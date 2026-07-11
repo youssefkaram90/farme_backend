@@ -1,0 +1,19 @@
+services:
+ postgresDB:
+  image: postgres:latest 
+  ports:
+    - 5434:5432
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: postgresDB
+  volumes:
+      - postgres_data:/var/lib/postgresql
+  networks:
+      - farmapp
+
+volumes:
+  postgres_data:
+
+networks:
+  farmapp:
