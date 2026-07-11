@@ -17,19 +17,21 @@ export class AuthService {
 
   async signin(user: User, response: Response) {
     const expiresAccessToken = new Date();
-    expiresAccessToken.setMilliseconds(
+    expiresAccessToken.setTime(
       expiresAccessToken.getTime() +
         parseInt(
           this.configService.getOrThrow<string>('ACCESS_TOKEN_EXPIRATION'),
+        10
         ),
     );
 
     const expiresRefreshToken = new Date();
-    expiresRefreshToken.setMilliseconds(
+    expiresRefreshToken.setTime(
       expiresRefreshToken.getTime() +
         parseInt(
           this.configService.getOrThrow<string>('REFRESH_TOKEN_EXPIRATION'),
-        ),
+        10
+   ),
     );
 
     const payload: TokenPayload = {
@@ -59,12 +61,15 @@ export class AuthService {
       httpOnly: true,
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresAccessToken,
+      sameSite:'lax'
     });
 
     response.cookie('Refresh', refreshToken, {
       httpOnly: true,
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresRefreshToken,
+      sameSite:'lax',
+      path:"auth/refresh"
     });
   }
 
