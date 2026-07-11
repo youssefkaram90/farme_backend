@@ -57,13 +57,13 @@ export class AuthService {
 
     response.cookie('Authentication', accessToken, {
       httpOnly: true,
-      secure: this.configService.get('NOD_ENV') === 'production',
+      secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresAccessToken,
     });
 
     response.cookie('Refresh', refreshToken, {
       httpOnly: true,
-      secure: this.configService.get('NOD_ENV') === 'production',
+      secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresRefreshToken,
     });
   }
@@ -87,7 +87,7 @@ export class AuthService {
 
       if (!user.refreshToken) throw new UnauthorizedException("refresh not token");
 
-      const authentication = argon2.verify(user.refreshToken,refreshToken);
+      const authentication = await argon2.verify(user.refreshToken,refreshToken);
       if (!authentication) throw new UnauthorizedException("refresh not hash");
 
       return user;
