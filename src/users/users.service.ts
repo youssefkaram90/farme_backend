@@ -51,7 +51,12 @@ export class UsersService {
   }
 
   async getUsers(){
-    return this.prismaService.user.findMany();
+
+    return this.prismaService.user.findMany({
+      omit:{
+        password:true,
+      }
+    });
   }
 
   async updateUser(where:UserWhereInput,data:UserUpdateInput){
