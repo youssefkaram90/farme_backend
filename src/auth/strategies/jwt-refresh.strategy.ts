@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -35,7 +35,7 @@ export class JwtRefreshStrategy extends PassportStrategy(
 
   async validate(request: Request, payload: TokenPayload) {
     const token = JwtRefreshStrategy.refreshTokenExtractor(request);
-    if (!token) throw new Error('Refresh token not found');
+    if (!token) throw new UnauthorizedException('Refresh token not found');
 
     return this.authService.verifyRefreshToken(token, payload.jti);
   }

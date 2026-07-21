@@ -14,10 +14,10 @@ datasource db {
 }
 
 model User {
-  id       String @id @default(cuid())
-  name     String @unique
+  id       String  @id @default(cuid())
+  name     String  @unique
   password String
-
+  role     String
   lastName String?
 
   createdAt DateTime @default(now())

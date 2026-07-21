@@ -1,4 +1,4 @@
-import { Controller, Post, UseGuards, Res, Get, Req } from '@nestjs/common';
+import { Controller, Post, UseGuards, Res, Req, Body } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { localAuthGuard } from './guards/local-auth.guard';
 import { CurrentUser } from './current-user.decorator';
@@ -27,43 +27,55 @@ export class AuthController {
   @Post('refresh')
   @UseGuards(JwtRefreshAuthGuard)
   async refreshToken(
-    @CurrentUser() user: { user: User; tokenRecord: { id: string; familyId: string; userId: string } },
+    @CurrentUser()
+    user: {
+      user: User;
+      tokenRecord: { id: string; familyId: string; userId: string };
+    },
     @Res({ passthrough: true }) response: Response,
     @Req() request: Request,
   ) {
-    return this.authService.rotateRefreshToken(
-      user.tokenRecord,
-      response,
-      {
-        userAgent: request.headers['user-agent'],
-        ipAddress: request.ip,
-      },
-    );
+    return this.authService.rotateRefreshToken(user.tokenRecord, response, {
+      userAgent: request.headers['user-agent'],
+      ipAddress: request.ip,
+    });
   }
 
-  @Post('logout')
+  @Post('signout')
   @UseGuards(JwtAuthGuard)
-  async logout(
+  async signout(
     @CurrentUser() user: User,
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
+    @Body('refreshToken') bodyRefreshToken?: string,
   ) {
-    // Extract jti from the access token — we'd need to decode it
-    // For simplicity, clear cookies
+    // Extract the refresh token from: cookie (web) or request body (mobile)
+    const rawRefreshToken = request.cookies?.Refresh ?? bodyRefreshToken;
+
+    if (rawRefreshToken) {
+      // Decode the JWT to get jti (without verifying — access token already verified by guard)
+      const payload = JSON.parse(
+        Buffer.from(rawRefreshToken.split('.')[1], 'base64').toString(),
+      );
+      if (payload.jti) {
+        await this.authService.signout(payload.jti);
+      }
+    }
+
     response.clearCookie('Authentication');
-    response.clearCookie('Refresh');
-    return { message: 'Logged out' };
+    response.clearCookie('Refresh', { path: '/auth/refresh' });
+    return { message: 'signed out' };
   }
 
-  @Post('logout-all')
+  @Post('signout-all')
   @UseGuards(JwtAuthGuard)
-  async logoutAll(
+  async signoutAll(
     @CurrentUser() user: User,
     @Res({ passthrough: true }) response: Response,
   ) {
-    await this.authService.logoutAll(user.id);
+    await this.authService.signoutAll(user.id);
     response.clearCookie('Authentication');
-    response.clearCookie('Refresh');
+    response.clearCookie('Refresh', { path: '/auth/refresh' });
     return { message: 'Logged out from all devices' };
   }
 }

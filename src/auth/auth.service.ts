@@ -249,14 +249,14 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  async logout(jti: string) {
+  async signout(jti: string) {
     await this.prismaService.refreshToken.update({
       where: { jti },
       data: { revokedAt: new Date() },
     });
   }
 
-  async logoutAll(userId: string) {
+  async signoutAll(userId: string) {
     await this.prismaService.refreshToken.updateMany({
       where: { userId, revokedAt: null },
       data: { revokedAt: new Date() },
