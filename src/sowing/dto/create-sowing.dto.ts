@@ -1,4 +1,5 @@
 import {
+  IsDate,
   IsEnum,
   IsNotEmpty,
   IsNumber,
@@ -16,6 +17,7 @@ export class CreateSowingDto {
   cropType!: string;
 
   @Type(() => Date)
+  @IsDate()
   sowingDate!: Date;
 
   @IsEnum(FieldLocation)

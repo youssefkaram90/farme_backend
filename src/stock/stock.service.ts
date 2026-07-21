@@ -1,4 +1,4 @@
-import {
+﻿import {
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -15,8 +15,12 @@ export class StockService {
   constructor(private prismaService: PrismaService) {}
 
   /**
-   * Add stock (positive quantity) — called when a delivery is created.
+   * Add stock (positive quantity) - called when a delivery is created.
    * Creates the StockItem if it doesn't exist, otherwise increments.
+   *
+   * When no external transaction is provided, the upsert and movement creation
+   * are wrapped in an internal transaction so that a failure between the two
+   * writes rolls back the quantity change, keeping stock and audit in sync.
    *
    * @param tx - Optional transaction client. If provided, operations run inside the caller's transaction.
    */
@@ -36,45 +40,48 @@ export class StockService {
       throw new BadRequestException('Quantity must be positive');
     }
 
-    // Use the provided transaction client, or create a standalone one
-    const client = tx ?? this.prismaService;
-
-    // Upsert: create stock item if not exists, otherwise update quantity
-    const stockItem = await client.stockItem.upsert({
-      where: {
-        productType_stockType_lotNumber: {
+    const execute = async (c: TxClient | typeof this.prismaService) => {
+      const stockItem = await c.stockItem.upsert({
+        where: {
+          productType_stockType_lotNumber: {
+            productType,
+            stockType,
+            lotNumber,
+          },
+        },
+        update: {
+          currentQuantity: { increment: quantity },
+        },
+        create: {
           productType,
           stockType,
           lotNumber,
+          currentQuantity: quantity,
         },
-      },
-      update: {
-        currentQuantity: { increment: quantity },
-      },
-      create: {
-        productType,
-        stockType,
-        lotNumber,
-        currentQuantity: quantity,
-      },
-    });
+      });
 
-    // Record the movement
-    await client.stockMovement.create({
-      data: {
-        stockItemId: stockItem.id,
-        quantity,
-        referenceType: ReferenceType.DELIVERY,
-        referenceId,
-      },
-    });
+      await c.stockMovement.create({
+        data: {
+          stockItemId: stockItem.id,
+          quantity,
+          referenceType: ReferenceType.DELIVERY,
+          referenceId,
+        },
+      });
 
-    return stockItem;
+      return stockItem;
+    };
+
+    if (!tx) {
+      return this.prismaService.$transaction((c) => execute(c));
+    }
+
+    return execute(tx);
   }
 
   /**
-   * Remove stock (negative quantity) — called when sowing is created.
-   * Validates that sufficient stock exists.
+   * Remove stock (negative quantity) - called when sowing is created.
+   * Decrements stock and records a movement. Negative stock is allowed.
    *
    * @param tx - Optional transaction client. If provided, operations run inside the caller's transaction.
    */
@@ -94,7 +101,6 @@ export class StockService {
       throw new BadRequestException('Quantity must be positive');
     }
 
-    // Use the provided transaction client, or create a standalone one
     const client = tx ?? this.prismaService;
 
     const stockItem = await client.stockItem.findUnique({
@@ -113,12 +119,6 @@ export class StockService {
       );
     }
 
-    if (stockItem.currentQuantity < quantity) {
-      throw new BadRequestException(
-        `Insufficient stock. Available: ${stockItem.currentQuantity}, requested: ${quantity}`,
-      );
-    }
-
     const updated = await client.stockItem.update({
       where: { id: stockItem.id },
       data: {
@@ -126,7 +126,6 @@ export class StockService {
       },
     });
 
-    // Record the movement
     await client.stockMovement.create({
       data: {
         stockItemId: stockItem.id,
@@ -139,14 +138,12 @@ export class StockService {
     return updated;
   }
 
-  /** Get all stock items with current quantities */
   async findAll() {
     return this.prismaService.stockItem.findMany({
       orderBy: [{ productType: 'asc' }, { lotNumber: 'asc' }],
     });
   }
 
-  /** Get a single stock item by ID */
   async findOne(id: string) {
     const item = await this.prismaService.stockItem.findUnique({
       where: { id },
@@ -164,7 +161,6 @@ export class StockService {
     return item;
   }
 
-  /** Get movements for a specific stock item */
   async getMovements(stockItemId: string) {
     return this.prismaService.stockMovement.findMany({
       where: { stockItemId },
@@ -172,7 +168,6 @@ export class StockService {
     });
   }
 
-  /** Get stock summary grouped by product type */
   async getSummary() {
     const items = await this.prismaService.stockItem.findMany();
     const summary = {
