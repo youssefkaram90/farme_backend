@@ -4,8 +4,10 @@ import { JwtService } from '@nestjs/jwt';
 import { UsersService } from '../users/users.service';
 import { ConfigService } from '@nestjs/config';
 import { User } from '../generated/prisma/client';
-import { Response } from 'express';
+import { Response, Request } from 'express';
 import { TokenPayload } from './token-payload';
+import { randomUUID } from 'crypto';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class AuthService {
@@ -13,15 +15,25 @@ export class AuthService {
     private userService: UsersService,
     private configService: ConfigService,
     private jwtService: JwtService,
+    private prismaService: PrismaService,
   ) {}
 
-  async signin(user: User, response: Response) {
+  async signin(
+    user: User,
+    response: Response,
+    metadata?: {
+      deviceId?: string;
+      deviceName?: string;
+      userAgent?: string;
+      ipAddress?: string;
+    },
+  ) {
     const expiresAccessToken = new Date();
     expiresAccessToken.setTime(
       expiresAccessToken.getTime() +
         parseInt(
           this.configService.getOrThrow<string>('ACCESS_TOKEN_EXPIRATION'),
-        10
+          10,
         ),
     );
 
@@ -30,47 +42,66 @@ export class AuthService {
       expiresRefreshToken.getTime() +
         parseInt(
           this.configService.getOrThrow<string>('REFRESH_TOKEN_EXPIRATION'),
-        10
-   ),
+          10,
+        ),
     );
 
-    const payload: TokenPayload = {
+    const jti = randomUUID();
+    const familyId = randomUUID();
+
+    const refreshPayload: TokenPayload = {
       sub: user.id.toString(),
+      jti,
+      type: 'refresh',
     };
 
-    const accessToken = this.jwtService.sign(payload, {
+    const accessPayload: TokenPayload = {
+      sub: user.id.toString(),
+      jti: '',
+      type: 'access',
+    };
+
+    const accessToken = this.jwtService.sign(accessPayload, {
       secret: this.configService.getOrThrow('JWT_ACCESS_TOKEN_SECRET'),
       expiresIn: `${this.configService.getOrThrow('ACCESS_TOKEN_EXPIRATION')}ms`,
     });
 
-    const refreshToken = this.jwtService.sign(payload, {
+    const refreshToken = this.jwtService.sign(refreshPayload, {
       secret: this.configService.getOrThrow('JWT_REFRESH_TOKEN_SECRET'),
       expiresIn: `${this.configService.getOrThrow('REFRESH_TOKEN_EXPIRATION')}ms`,
     });
 
-    await this.userService.updateUser(
-      {
-        id: user.id,
+    await this.prismaService.refreshToken.create({
+      data: {
+        userId: user.id,
+        jti,
+        familyId,
+        hashedToken: await argon2.hash(refreshToken),
+        deviceId: metadata?.deviceId,
+        deviceName: metadata?.deviceName,
+        userAgent: metadata?.userAgent,
+        ipAddress: metadata?.ipAddress,
+        expiresAt: expiresRefreshToken,
+        lastUsedAt: new Date(),
       },
-      {
-        refreshToken: await argon2.hash(refreshToken),
-      },
-    );
+    });
 
     response.cookie('Authentication', accessToken, {
       httpOnly: true,
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresAccessToken,
-      sameSite:'lax'
+      sameSite: 'lax',
     });
 
     response.cookie('Refresh', refreshToken, {
       httpOnly: true,
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresRefreshToken,
-      sameSite:'lax',
-      path:"auth/refresh"
+      sameSite: 'lax',
+      path: '/auth/refresh',
     });
+
+    response.json({ id: user.id, accessToken, refreshToken });
   }
 
   async verifyUser(name: string, password: string) {
@@ -86,18 +117,149 @@ export class AuthService {
     }
   }
 
-  async verifyRefeshToken(refreshToken: string, id: string) {
+  async verifyRefreshToken(refreshToken: string, jti: string) {
     try {
-      const user = await this.userService.getUser({ id: Number(id) });
+      const tokenRecord = await this.prismaService.refreshToken.findUnique({
+        where: { jti },
+      });
 
-      if (!user.refreshToken) throw new UnauthorizedException("refresh not token");
+      if (!tokenRecord) throw new UnauthorizedException('Refresh token not valid');
 
-      const authentication = await argon2.verify(user.refreshToken,refreshToken);
-      if (!authentication) throw new UnauthorizedException("refresh not hash");
+      if (tokenRecord.revokedAt) {
+        // Reuse detection: this token was already rotated, revoke the entire family
+        await this.prismaService.refreshToken.updateMany({
+          where: { familyId: tokenRecord.familyId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
 
-      return user;
-    } catch (eror) {
+        throw new UnauthorizedException('Token has been revoked');
+      }
+
+      if (tokenRecord.expiresAt < new Date()) {
+        throw new UnauthorizedException('Refresh token expired');
+      }
+
+      const isValid = await argon2.verify(
+        tokenRecord.hashedToken,
+        refreshToken,
+      );
+      if (!isValid) throw new UnauthorizedException('Refresh token not valid');
+
+      // Update last used timestamp
+      await this.prismaService.refreshToken.update({
+        where: { id: tokenRecord.id },
+        data: { lastUsedAt: new Date() },
+      });
+
+      return { user: await this.userService.getUser({ id: tokenRecord.userId }), tokenRecord };
+    } catch (error) {
       throw new UnauthorizedException('Refresh token not valid');
     }
+  }
+
+  async rotateRefreshToken(
+    oldTokenRecord: { id: string; familyId: string; userId: string },
+    response: Response,
+    metadata?: {
+      deviceId?: string;
+      deviceName?: string;
+      userAgent?: string;
+      ipAddress?: string;
+    },
+  ) {
+    const expiresAccessToken = new Date();
+    expiresAccessToken.setTime(
+      expiresAccessToken.getTime() +
+        parseInt(
+          this.configService.getOrThrow<string>('ACCESS_TOKEN_EXPIRATION'),
+          10,
+        ),
+    );
+
+    const expiresRefreshToken = new Date();
+    expiresRefreshToken.setTime(
+      expiresRefreshToken.getTime() +
+        parseInt(
+          this.configService.getOrThrow<string>('REFRESH_TOKEN_EXPIRATION'),
+          10,
+        ),
+    );
+
+    const jti = randomUUID();
+
+    const refreshPayload: TokenPayload = {
+      sub: oldTokenRecord.userId.toString(),
+      jti,
+      type: 'refresh',
+    };
+
+    const accessPayload: TokenPayload = {
+      sub: oldTokenRecord.userId.toString(),
+      jti: '',
+      type: 'access',
+    };
+
+    const accessToken = this.jwtService.sign(accessPayload, {
+      secret: this.configService.getOrThrow('JWT_ACCESS_TOKEN_SECRET'),
+      expiresIn: `${this.configService.getOrThrow('ACCESS_TOKEN_EXPIRATION')}ms`,
+    });
+
+    const refreshToken = this.jwtService.sign(refreshPayload, {
+      secret: this.configService.getOrThrow('JWT_REFRESH_TOKEN_SECRET'),
+      expiresIn: `${this.configService.getOrThrow('REFRESH_TOKEN_EXPIRATION')}ms`,
+    });
+
+    // Revoke old token
+    await this.prismaService.refreshToken.update({
+      where: { id: oldTokenRecord.id },
+      data: { revokedAt: new Date() },
+    });
+
+    // Create new token with same familyId
+    await this.prismaService.refreshToken.create({
+      data: {
+        userId: oldTokenRecord.userId,
+        jti,
+        familyId: oldTokenRecord.familyId,
+        hashedToken: await argon2.hash(refreshToken),
+        deviceId: metadata?.deviceId,
+        deviceName: metadata?.deviceName,
+        userAgent: metadata?.userAgent,
+        ipAddress: metadata?.ipAddress,
+        expiresAt: expiresRefreshToken,
+        lastUsedAt: new Date(),
+      },
+    });
+
+    response.cookie('Authentication', accessToken, {
+      httpOnly: true,
+      secure: this.configService.get('NODE_ENV') === 'production',
+      expires: expiresAccessToken,
+      sameSite: 'lax',
+    });
+
+    response.cookie('Refresh', refreshToken, {
+      httpOnly: true,
+      secure: this.configService.get('NODE_ENV') === 'production',
+      expires: expiresRefreshToken,
+      sameSite: 'lax',
+      path: '/auth/refresh',
+    });
+
+    return { accessToken, refreshToken };
+  }
+
+  async logout(jti: string) {
+    await this.prismaService.refreshToken.update({
+      where: { jti },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  async logoutAll(userId: string) {
+    await this.prismaService.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
   }
 }

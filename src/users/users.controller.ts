@@ -11,13 +11,12 @@ export class UsersController {
 
   @Post()
    create(@Body() createUserDto: CreateUserDto) {
-    console.log("users controller");
     return this.usersService.create(createUserDto);
   }
 
   @Get()
   @UseGuards(JwtAuthGuard)
-  getUsers(@CurrentUser() user:User){
+  getUsers(){
     return this.usersService.getUsers();
   }
 

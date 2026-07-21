@@ -55,7 +55,6 @@ export class UsersService {
     return this.prismaService.user.findMany({
       omit:{
         password:true,
-        refreshToken:true,
       }
     });
   }
