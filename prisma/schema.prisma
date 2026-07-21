@@ -60,3 +60,76 @@ model RefreshToken {
   @@index([familyId])
   @@index([expiresAt])
 }
+model Delivery {
+  id        String   @id @default(cuid())
+  stockType String   // 'BIO' | 'CVT'
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lots DeliveryLot[]
+}
+
+model DeliveryLot {
+  id        String @id @default(cuid())
+  deliveryId String
+  delivery  Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  lotNumber  String
+  quantity   Int
+  thousandSeedsPerGram Int?
+  productType String // 'SEEDS' | 'PEAT'
+  supplierName String
+  remark     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([deliveryId])
+}
+
+model StockItem {
+  id              String   @id @default(cuid())
+  productType     String   // 'SEEDS' | 'PEAT'
+  stockType       String   // 'BIO' | 'CVT'
+  lotNumber       String
+  currentQuantity Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  movements StockMovement[]
+
+  @@unique([productType, stockType, lotNumber])
+}
+
+model StockMovement {
+  id            String   @id @default(cuid())
+  stockItemId   String
+  stockItem     StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+
+  quantity      Int      // positive = in, negative = out
+  referenceType String   // 'delivery', 'sowing'
+  referenceId   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([stockItemId])
+  @@index([referenceType, referenceId])
+}
+
+model Sowing {
+  id         String   @id @default(cuid())
+  cropType   String
+  sowingDate DateTime
+  greenhouse String   // 'GREENHOUSE' | 'FIELD'
+  lotNumber  String
+  productType String  // 'SEEDS' | 'PEAT'
+  stockType  String   // 'BIO' | 'CVT'
+  quantityUsed Int
+
+  remarks String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
