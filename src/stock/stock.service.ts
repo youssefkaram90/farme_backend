@@ -31,10 +31,18 @@ export class StockService {
       stockType: string;
       quantity: number;
       referenceId?: string;
+      referenceType: ReferenceType;
     },
     tx?: TxClient,
   ) {
-    const { lotNumber, productType, stockType, quantity, referenceId } = params;
+    const {
+      lotNumber,
+      productType,
+      stockType,
+      quantity,
+      referenceId,
+      referenceType,
+    } = params;
 
     if (quantity <= 0) {
       throw new BadRequestException('Quantity must be positive');
@@ -64,7 +72,7 @@ export class StockService {
         data: {
           stockItemId: stockItem.id,
           quantity,
-          referenceType: ReferenceType.DELIVERY,
+          referenceType,
           referenceId,
         },
       });
@@ -92,10 +100,18 @@ export class StockService {
       stockType: string;
       quantity: number;
       referenceId?: string;
+      referenceType: ReferenceType;
     },
     tx?: TxClient,
   ) {
-    const { lotNumber, productType, stockType, quantity, referenceId } = params;
+    const {
+      lotNumber,
+      productType,
+      stockType,
+      quantity,
+      referenceId,
+      referenceType,
+    } = params;
 
     if (quantity <= 0) {
       throw new BadRequestException('Quantity must be positive');
@@ -130,7 +146,7 @@ export class StockService {
       data: {
         stockItemId: stockItem.id,
         quantity: -quantity,
-        referenceType: ReferenceType.SOWING,
+        referenceType,
         referenceId,
       },
     });

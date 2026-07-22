@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Patch, Delete, UseGuards } from '@nestjs/common';
 import { DeliveriesService } from './deliveries.service';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -21,5 +21,18 @@ export class DeliveriesController {
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.deliveriesService.findOne(id);
+  }
+
+  @Patch(':id')
+  update(
+    @Param('id') id: string,
+    @Body() updateDeliveryDto: CreateDeliveryDto,
+  ) {
+    return this.deliveriesService.update(id, updateDeliveryDto);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.deliveriesService.remove(id);
   }
 }
