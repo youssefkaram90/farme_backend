@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
@@ -36,7 +36,7 @@ export class DeliveriesService {
         include: { lots: true },
       });
 
-      // Update stock for each lot — passing `tx` ensures the same transaction
+      // Update stock for each lot — passing tx ensures the same transaction
       for (const lot of created.lots) {
         await this.stockService.addStock(
           {
@@ -67,6 +67,104 @@ export class DeliveriesService {
     return this.prismaService.delivery.findUnique({
       where: { id },
       include: { lots: true },
+    });
+  }
+
+  async update(id: string, updateDeliveryDto: CreateDeliveryDto) {
+    const existing = await this.prismaService.delivery.findUnique({
+      where: { id },
+      include: { lots: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Delivery with ID ${id} not found`);
+    }
+
+    const { stockType, lots } = updateDeliveryDto;
+
+    return this.prismaService.$transaction(async (tx) => {
+      // Reverse old stock: remove stock for each existing lot
+      for (const lot of existing.lots) {
+        await this.stockService.removeStock(
+          {
+            lotNumber: lot.lotNumber,
+            productType: lot.productType,
+            stockType: existing.stockType,
+            quantity: lot.quantity,
+            referenceId: lot.id,
+          },
+          tx,
+        );
+      }
+
+      // Delete old lots
+      await tx.deliveryLot.deleteMany({ where: { deliveryId: id } });
+
+      // Create new lots and update stock
+      const updated = await tx.delivery.update({
+        where: { id },
+        data: {
+          stockType,
+          lots: {
+            create: lots.map((lot) => ({
+              lotNumber: lot.lotNumber,
+              quantity: lot.quantity,
+              thousandSeedsPerGram: lot.thousandSeedsPerGram,
+              productType: lot.productType,
+              supplierName: lot.supplierName,
+              remark: lot.remark,
+            })),
+          },
+        },
+        include: { lots: true },
+      });
+
+      for (const lot of updated.lots) {
+        await this.stockService.addStock(
+          {
+            lotNumber: lot.lotNumber,
+            productType: lot.productType,
+            stockType,
+            quantity: lot.quantity,
+            referenceId: lot.id,
+          },
+          tx,
+        );
+      }
+
+      return updated;
+    });
+  }
+
+  async remove(id: string) {
+    const existing = await this.prismaService.delivery.findUnique({
+      where: { id },
+      include: { lots: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Delivery with ID ${id} not found`);
+    }
+
+    return this.prismaService.$transaction(async (tx) => {
+      // Reverse stock for each lot
+      for (const lot of existing.lots) {
+        await this.stockService.removeStock(
+          {
+            lotNumber: lot.lotNumber,
+            productType: lot.productType,
+            stockType: existing.stockType,
+            quantity: lot.quantity,
+            referenceId: lot.id,
+          },
+          tx,
+        );
+      }
+
+      // Delete delivery (cascades to lots and stock movements)
+      await tx.delivery.delete({ where: { id } });
+
+      return { message: 'Delivery deleted successfully' };
     });
   }
 }
