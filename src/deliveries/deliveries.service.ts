@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
+import { ReferenceType } from '../stock/enums/reference-type.enum';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
 import { Prisma } from '../generated/prisma/client';
 
@@ -45,6 +46,7 @@ export class DeliveriesService {
             stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
+            referenceType: ReferenceType.DELIVERY,
           },
           tx,
         );
@@ -92,6 +94,7 @@ export class DeliveriesService {
             stockType: existing.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
+            referenceType: ReferenceType.DELIVERY,
           },
           tx,
         );
@@ -127,6 +130,7 @@ export class DeliveriesService {
             stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
+            referenceType: ReferenceType.DELIVERY,
           },
           tx,
         );
@@ -156,6 +160,7 @@ export class DeliveriesService {
             stockType: existing.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
+            referenceType: ReferenceType.DELIVERY,
           },
           tx,
         );

@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
+import { ReferenceType } from '../stock/enums/reference-type.enum';
 import { CreateSowingDto } from './dto/create-sowing.dto';
 
 @Injectable()
@@ -46,6 +47,7 @@ export class SowingService {
           stockType,
           quantity: quantityUsed,
           referenceId: sowing.id,
+          referenceType: ReferenceType.SOWING,
         },
         tx,
       );
@@ -95,6 +97,7 @@ export class SowingService {
           stockType: existing.stockType,
           quantity: existing.quantityUsed,
           referenceId: existing.id,
+          referenceType: ReferenceType.SOWING,
         },
         tx,
       );
@@ -107,6 +110,7 @@ export class SowingService {
           stockType,
           quantity: quantityUsed,
           referenceId: id,
+          referenceType: ReferenceType.SOWING,
         },
         tx,
       );
@@ -146,6 +150,7 @@ export class SowingService {
           stockType: existing.stockType,
           quantity: existing.quantityUsed,
           referenceId: existing.id,
+          referenceType: ReferenceType.SOWING,
         },
         tx,
       );
