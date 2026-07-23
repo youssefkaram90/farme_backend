@@ -1,11 +1,20 @@
-import { IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 import { ProductType } from '../enums/product-type.enum';
+import { StockType } from '../enums/stock-type.enum';
 
 export class LotsDto {
   @IsString()
   @IsNotEmpty()
   lotNumber!: string;
+
+    @IsEnum(StockType)
+    stockType!: StockType;
 
   @IsNumber()
   quantity!: number;
@@ -16,6 +25,10 @@ export class LotsDto {
 
   @IsEnum(ProductType)
   productType!: ProductType;
+
+  @IsString()
+  @IsNotEmpty()
+  productName!: string;
 
   @IsString()
   @IsNotEmpty()

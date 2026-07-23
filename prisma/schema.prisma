@@ -14,7 +14,7 @@ datasource db {
 }
 
 model User {
-  id       String  @id @default(cuid())
+  id       String  @id @default(uuid())
   name     String  @unique
   password String
   role     String
@@ -27,7 +27,7 @@ model User {
 }
 
 model RefreshToken {
-  id String @id @default(cuid())
+  id String @id @default(uuid())
 
   /// User who owns this session
   userId String
@@ -60,27 +60,31 @@ model RefreshToken {
   @@index([familyId])
   @@index([expiresAt])
 }
-model Delivery {
-  id        String   @id @default(cuid())
-  stockType String   // 'BIO' | 'CVT'
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Delivery {
+  id String @id @default(uuid())
+
+  deliveryDate DateTime
+  deliveryCode String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   lots DeliveryLot[]
 }
 
 model DeliveryLot {
-  id        String @id @default(cuid())
+  id         String   @id @default(uuid())
   deliveryId String
-  delivery  Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 
-  lotNumber  String
-  quantity   Int
-  thousandSeedsPerGram Int?
-  productType String // 'SEEDS' | 'PEAT'
-  supplierName String
-  remark     String?
+  productName          String
+  stockType            String // 'BIO' | 'CVT'
+  productType          String // 'SEEDS' | 'PEAT'
+  lotNumber            String
+  quantity             Int
+  thousandSeedsPerGram Float?
+  supplierName         String
+  remark               String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -89,11 +93,13 @@ model DeliveryLot {
 }
 
 model StockItem {
-  id              String   @id @default(cuid())
-  productType     String   // 'SEEDS' | 'PEAT'
-  stockType       String   // 'BIO' | 'CVT'
+  id              String @id @default(uuid())
+  productType     String // 'SEEDS' | 'PEAT'
+  stockType       String // 'BIO' | 'CVT'
   lotNumber       String
-  currentQuantity Int      @default(0)
+  productName     String
+  supplierName    String
+  currentQuantity Int    @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -104,12 +110,12 @@ model StockItem {
 }
 
 model StockMovement {
-  id            String   @id @default(cuid())
-  stockItemId   String
-  stockItem     StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+  id          String    @id @default(uuid())
+  stockItemId String
+  stockItem   StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
 
-  quantity      Int      // positive = in, negative = out
-  referenceType String   // 'delivery', 'sowing'
+  quantity      Int // positive = in, negative = out
+  referenceType String // 'delivery', 'sowing'
   referenceId   String?
 
   createdAt DateTime @default(now())
@@ -119,17 +125,51 @@ model StockMovement {
 }
 
 model Sowing {
-  id         String   @id @default(cuid())
-  cropType   String
-  sowingDate DateTime
-  greenhouse String   // 'GREENHOUSE' | 'FIELD'
-  lotNumber  String
-  productType String  // 'SEEDS' | 'PEAT'
-  stockType  String   // 'BIO' | 'CVT'
+  id           String   @id @default(uuid())
+  variety      String
+  sowingDate   DateTime
+  sowingType   String // 'TUNNEL(SSM => superseedling morocco)' | 'FIELD(LPM => looseplant morocco)'
+  lotNumber    String
+  productType  String // 'SEEDS' | 'PEAT'
+  stockType    String // 'CVT' | 'BIO'
   quantityUsed Int
+
+  /// Number of trays used (only for GREENHOUSE sowings)
+  numberOfTrays Int?
+  /// Seeds per tray (default 285, only for GREENHOUSE sowings)
+  seedsPerTray  Int?
 
   remarks String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  plantStock PlantStock?
+}
+
+model PlantStock {
+  id       String @id @default(uuid())
+  sowingId String @unique
+  sowing   Sowing @relation(fields: [sowingId], references: [id], onDelete: Cascade)
+
+  variety   String
+  location  String // 'TUNNEL' | 'FIELD'
+  lotNumber String
+  stockType String // 'CVT' | 'BIO'
+
+  /// For greenhouse: number of trays. For field: null.
+  numberOfTrays  Int?
+  /// For greenhouse: seeds per tray. For field: null.
+  seedsPerTray   Int?
+  /// Expected number of plants (for greenhouse: trays * seedsPerTray; for field: quantityUsed)
+  expectedPlants Int
+
+  /// Current stage of the plants (e.g., SEEDLING, GROWING, FLOWERING, HARVESTED)
+  currentStage String @default("SEEDLING")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([location])
+  @@index([variety])
 }

@@ -5,8 +5,9 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Min,
 } from 'class-validator';
-import { FieldLocation } from '../enums/field-location.enum';
+import { SowingType } from '../enums/field-location.enum';
 import { ProductType } from '../../deliveries/enums/product-type.enum';
 import { StockType } from '../../deliveries/enums/stock-type.enum';
 import { Type } from 'class-transformer';
@@ -14,14 +15,14 @@ import { Type } from 'class-transformer';
 export class CreateSowingDto {
   @IsString()
   @IsNotEmpty()
-  cropType!: string;
+  variety!: string;
 
   @Type(() => Date)
   @IsDate()
   sowingDate!: Date;
 
-  @IsEnum(FieldLocation)
-  greenhouse!: FieldLocation;
+  @IsEnum(SowingType)
+  sowingType!: SowingType;
 
   @IsString()
   @IsNotEmpty()
@@ -35,6 +36,18 @@ export class CreateSowingDto {
 
   @IsNumber()
   quantityUsed!: number;
+
+  /// Number of trays (for GREENHOUSE only)
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  numberOfTrays?: number;
+
+  /// Seeds per tray (for GREENHOUSE only, defaults to 285)
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  seedsPerTray?: number;
 
   @IsOptional()
   @IsString()
