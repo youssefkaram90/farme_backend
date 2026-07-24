@@ -1,4 +1,4 @@
-export enum FieldLocation {
-  GREENHOUSE = 'GREENHOUSE',
-  FIELD = 'FIELD',
+export enum SowingType {
+  SSM = 'SSM',
+  LPM = 'LPM',
 }

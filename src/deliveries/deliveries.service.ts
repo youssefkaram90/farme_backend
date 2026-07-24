@@ -16,19 +16,25 @@ export class DeliveriesService {
   ) {}
 
   async create(createDeliveryDto: CreateDeliveryDto) {
-    const { stockType, lots } = createDeliveryDto;
+    const { deliveryCode, deliveryDate, lots } = createDeliveryDto;
+
+    // Convert date-only string to full ISO-8601 DateTime
+    const deliveryDateISO = new Date(deliveryDate).toISOString();
 
     // Use a transaction to ensure delivery creation + stock update are atomic
     const delivery = await this.prismaService.$transaction(async (tx) => {
       const created = await tx.delivery.create({
         data: {
-          stockType,
+          deliveryCode,
+          deliveryDate: deliveryDateISO,
           lots: {
             create: lots.map((lot) => ({
               lotNumber: lot.lotNumber,
+              stockType: lot.stockType,
               quantity: lot.quantity,
               thousandSeedsPerGram: lot.thousandSeedsPerGram,
               productType: lot.productType,
+              productName: lot.productName,
               supplierName: lot.supplierName,
               remark: lot.remark,
             })),
@@ -43,10 +49,12 @@ export class DeliveriesService {
           {
             lotNumber: lot.lotNumber,
             productType: lot.productType,
-            stockType,
+            stockType: lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
+            productName: lot.productName,
+            supplierName: lot.supplierName,
           },
           tx,
         );
@@ -82,7 +90,10 @@ export class DeliveriesService {
       throw new NotFoundException(`Delivery with ID ${id} not found`);
     }
 
-    const { stockType, lots } = updateDeliveryDto;
+    const { deliveryDate, lots } = updateDeliveryDto;
+
+    // Convert date-only string to full ISO-8601 DateTime
+    const deliveryDateISO = new Date(deliveryDate).toISOString();
 
     return this.prismaService.$transaction(async (tx) => {
       // Reverse old stock: remove stock for each existing lot
@@ -91,7 +102,7 @@ export class DeliveriesService {
           {
             lotNumber: lot.lotNumber,
             productType: lot.productType,
-            stockType: existing.stockType,
+            stockType: lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
@@ -107,13 +118,15 @@ export class DeliveriesService {
       const updated = await tx.delivery.update({
         where: { id },
         data: {
-          stockType,
+          deliveryDate: deliveryDateISO,
           lots: {
             create: lots.map((lot) => ({
+              stockType: lot.stockType,
               lotNumber: lot.lotNumber,
               quantity: lot.quantity,
               thousandSeedsPerGram: lot.thousandSeedsPerGram,
               productType: lot.productType,
+              productName: lot.productName,
               supplierName: lot.supplierName,
               remark: lot.remark,
             })),
@@ -127,10 +140,12 @@ export class DeliveriesService {
           {
             lotNumber: lot.lotNumber,
             productType: lot.productType,
-            stockType,
+            stockType: lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
+            productName: lot.productName,
+            supplierName: lot.supplierName,
           },
           tx,
         );
@@ -157,7 +172,7 @@ export class DeliveriesService {
           {
             lotNumber: lot.lotNumber,
             productType: lot.productType,
-            stockType: existing.stockType,
+            stockType: lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,

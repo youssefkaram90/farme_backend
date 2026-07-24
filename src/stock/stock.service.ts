@@ -32,6 +32,8 @@ export class StockService {
       quantity: number;
       referenceId?: string;
       referenceType: ReferenceType;
+      productName?: string;
+      supplierName?: string;
     },
     tx?: TxClient,
   ) {
@@ -42,6 +44,8 @@ export class StockService {
       quantity,
       referenceId,
       referenceType,
+      productName,
+      supplierName,
     } = params;
 
     if (quantity <= 0) {
@@ -59,11 +63,15 @@ export class StockService {
         },
         update: {
           currentQuantity: { increment: quantity },
+          ...(productName !== undefined ? { productName } : {}),
+          ...(supplierName !== undefined ? { supplierName } : {}),
         },
         create: {
           productType,
           stockType,
           lotNumber,
+          productName: productName ?? '',
+          supplierName: supplierName ?? '',
           currentQuantity: quantity,
         },
       });

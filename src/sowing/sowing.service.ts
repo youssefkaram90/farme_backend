@@ -1,8 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { ReferenceType } from '../stock/enums/reference-type.enum';
 import { CreateSowingDto } from './dto/create-sowing.dto';
+
+const DEFAULT_SEEDS_PER_TRAY = 285;
 
 @Injectable()
 export class SowingService {
@@ -13,64 +19,106 @@ export class SowingService {
 
   async create(createSowingDto: CreateSowingDto) {
     const {
-      cropType,
+      variety,
       sowingDate,
-      greenhouse,
+      sowingType,
       lotNumber,
       productType,
       stockType,
       quantityUsed,
+      numberOfTrays,
+      seedsPerTray,
       remarks,
     } = createSowingDto;
 
     // Use a transaction to ensure stock deduction + sowing creation are atomic
     return this.prismaService.$transaction(async (tx) => {
-      // 1. Create the sowing record
+      // 1. Calculate actual seeds used
+      let actualQuantityUsed = quantityUsed;
+      let actualNumberOfTrays: number | null = null;
+      let actualSeedsPerTray: number | null = null;
+
+      if (sowingType === 'SSM') {
+        const nTrays = numberOfTrays ?? quantityUsed;
+        const sPerTray = seedsPerTray ?? DEFAULT_SEEDS_PER_TRAY;
+        actualNumberOfTrays = nTrays;
+        actualSeedsPerTray = sPerTray;
+        actualQuantityUsed = nTrays * sPerTray;
+      }
+
+      // 2. Create the sowing record
       const sowing = await tx.sowing.create({
         data: {
-          cropType,
+          variety,
           sowingDate,
-          greenhouse,
+          sowingType,
           lotNumber,
           productType,
           stockType,
-          quantityUsed,
+          quantityUsed: actualQuantityUsed,
+          numberOfTrays: actualNumberOfTrays,
+          seedsPerTray: actualSeedsPerTray,
           remarks,
         },
       });
 
-      // 2. Deduct stock and record movement — passing tx ensures the same transaction
+      // 3. Deduct stock and record movement — passing tx ensures the same transaction
       await this.stockService.removeStock(
         {
           lotNumber,
           productType,
           stockType,
-          quantity: quantityUsed,
+          quantity: actualQuantityUsed,
           referenceId: sowing.id,
           referenceType: ReferenceType.SOWING,
         },
         tx,
       );
 
-      return sowing;
+      // 4. Create plant stock record
+      const expectedPlants = actualNumberOfTrays
+        ? actualNumberOfTrays * actualSeedsPerTray!
+        : actualQuantityUsed;
+
+      await tx.plantStock.create({
+        data: {
+          sowingId: sowing.id,
+          variety,
+          location: sowingType,
+          lotNumber,
+          stockType,
+          numberOfTrays: actualNumberOfTrays,
+          seedsPerTray: actualSeedsPerTray,
+          expectedPlants,
+          currentStage: 'SEEDLING',
+        },
+      });
+
+      return tx.sowing.findUnique({
+        where: { id: sowing.id },
+        include: { plantStock: true },
+      });
     });
   }
 
   async findAll() {
     return this.prismaService.sowing.findMany({
       orderBy: { createdAt: 'desc' },
+      include: { plantStock: true },
     });
   }
 
   async findOne(id: string) {
     return this.prismaService.sowing.findUnique({
       where: { id },
+      include: { plantStock: true },
     });
   }
 
   async update(id: string, updateSowingDto: CreateSowingDto) {
     const existing = await this.prismaService.sowing.findUnique({
       where: { id },
+      include: { plantStock: true },
     });
 
     if (!existing) {
@@ -78,13 +126,15 @@ export class SowingService {
     }
 
     const {
-      cropType,
+      variety,
       sowingDate,
-      greenhouse,
+      sowingType,
       lotNumber,
       productType,
       stockType,
       quantityUsed,
+      numberOfTrays,
+      seedsPerTray,
       remarks,
     } = updateSowingDto;
 
@@ -102,13 +152,26 @@ export class SowingService {
         tx,
       );
 
+      // Calculate new seeds used
+      let actualQuantityUsed = quantityUsed;
+      let actualNumberOfTrays: number | null = null;
+      let actualSeedsPerTray: number | null = null;
+
+      if (sowingType === 'SSM') {
+        const nTrays = numberOfTrays ?? quantityUsed;
+        const sPerTray = seedsPerTray ?? DEFAULT_SEEDS_PER_TRAY;
+        actualNumberOfTrays = nTrays;
+        actualSeedsPerTray = sPerTray;
+        actualQuantityUsed = nTrays * sPerTray;
+      }
+
       // Apply new stock deduction
       await this.stockService.removeStock(
         {
           lotNumber,
           productType,
           stockType,
-          quantity: quantityUsed,
+          quantity: actualQuantityUsed,
           referenceId: id,
           referenceType: ReferenceType.SOWING,
         },
@@ -116,18 +179,59 @@ export class SowingService {
       );
 
       // Update sowing record
-      return tx.sowing.update({
+      await tx.sowing.update({
         where: { id },
         data: {
-          cropType,
+          variety,
           sowingDate,
-          greenhouse,
+          sowingType,
           lotNumber,
           productType,
           stockType,
-          quantityUsed,
+          quantityUsed: actualQuantityUsed,
+          numberOfTrays: actualNumberOfTrays,
+          seedsPerTray: actualSeedsPerTray,
           remarks,
         },
+      });
+
+      // Update plant stock
+      const expectedPlants = actualNumberOfTrays
+        ? actualNumberOfTrays * actualSeedsPerTray!
+        : actualQuantityUsed;
+
+      if (existing.plantStock) {
+        await tx.plantStock.update({
+          where: { sowingId: id },
+          data: {
+            variety,
+            location: sowingType,
+            lotNumber,
+            stockType,
+            numberOfTrays: actualNumberOfTrays,
+            seedsPerTray: actualSeedsPerTray,
+            expectedPlants,
+          },
+        });
+      } else {
+        await tx.plantStock.create({
+          data: {
+            sowingId: id,
+            variety,
+            location: sowingType,
+            lotNumber,
+            stockType,
+            numberOfTrays: actualNumberOfTrays,
+            seedsPerTray: actualSeedsPerTray,
+            expectedPlants,
+            currentStage: 'SEEDLING',
+          },
+        });
+      }
+
+      return tx.sowing.findUnique({
+        where: { id },
+        include: { plantStock: true },
       });
     });
   }
@@ -142,6 +246,9 @@ export class SowingService {
     }
 
     return this.prismaService.$transaction(async (tx) => {
+      // Delete plant stock (cascade will handle this, but do it explicitly)
+      await tx.plantStock.deleteMany({ where: { sowingId: id } });
+
       // Reverse the stock deduction
       await this.stockService.addStock(
         {
