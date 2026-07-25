@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, Param, Patch, Delete, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Patch,
+  Delete,
+  UseGuards,
+} from '@nestjs/common';
 import { SowingService } from './sowing.service';
 import { CreateSowingDto } from './dto/create-sowing.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -24,10 +33,7 @@ export class SowingController {
   }
 
   @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() updateSowingDto: CreateSowingDto,
-  ) {
+  update(@Param('id') id: string, @Body() updateSowingDto: CreateSowingDto) {
     return this.sowingService.update(id, updateSowingDto);
   }
 

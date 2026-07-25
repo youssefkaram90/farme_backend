@@ -6,7 +6,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { DeliveriesModule } from './deliveries/deliveries.module';
 import { StockModule } from './stock/stock.module';
 import { SowingModule } from './sowing/sowing.module';
-
+import { PermissionsModule } from './permissions/permissions.module';
 @Module({
   imports: [
     UsersModule,
@@ -14,6 +14,7 @@ import { SowingModule } from './sowing/sowing.module';
     PrismaModule,
     DeliveriesModule,
     StockModule,
+    PermissionsModule,
     SowingModule,
     ConfigModule.forRoot({ isGlobal: true }),
   ],

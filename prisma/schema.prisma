@@ -24,6 +24,31 @@ model User {
   updatedAt DateTime @updatedAt
 
   refreshTokens RefreshToken[]
+  permissions  UserPermission[]
+}
+
+/// Available permissions in the system (e.g. "sowing.view", "sowing.create")
+model Permission {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users UserPermission[]
+}
+
+/// Many-to-many relation between User and Permission
+model UserPermission {
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, permissionId])
 }
 
 model RefreshToken {
