@@ -3,10 +3,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { ReferenceType } from '../stock/enums/reference-type.enum';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
-import { Prisma } from '../generated/prisma/client';
-
-/** Subset of Prisma.TransactionClient with only the model accessors */
-type TxClient = Prisma.TransactionClient;
 
 @Injectable()
 export class DeliveriesService {
@@ -16,7 +12,7 @@ export class DeliveriesService {
   ) {}
 
   async create(createDeliveryDto: CreateDeliveryDto) {
-    const { deliveryCode, deliveryDate, lots } = createDeliveryDto;
+    const { deliveryCode, deliveryDate, remark, lots } = createDeliveryDto;
 
     // Convert date-only string to full ISO-8601 DateTime
     const deliveryDateISO = new Date(deliveryDate).toISOString();
@@ -27,6 +23,7 @@ export class DeliveriesService {
         data: {
           deliveryCode,
           deliveryDate: deliveryDateISO,
+          remark,
           lots: {
             create: lots.map((lot) => ({
               lotNumber: lot.lotNumber,
@@ -36,7 +33,6 @@ export class DeliveriesService {
               productType: lot.productType,
               productName: lot.productName,
               supplierName: lot.supplierName,
-              remark: lot.remark,
             })),
           },
         },
@@ -44,12 +40,13 @@ export class DeliveriesService {
       });
 
       // Update stock for each lot — passing tx ensures the same transaction
+      // PEAT is pooled: all PEAT deliveries go into a single stock item
       for (const lot of created.lots) {
         await this.stockService.addStock(
           {
-            lotNumber: lot.lotNumber,
+            lotNumber: lot.productType === 'PEAT' ? 'PEAT' : lot.lotNumber,
             productType: lot.productType,
-            stockType: lot.stockType,
+            stockType: lot.productType === 'PEAT' ? 'GENERIC' : lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
@@ -66,18 +63,66 @@ export class DeliveriesService {
     return delivery;
   }
 
-  async findAll() {
+  async findAll(q?: string) {
+    const where = q
+      ? {
+          OR: [
+            { deliveryCode: { contains: q, mode: 'insensitive' as const } },
+            { remark: { contains: q, mode: 'insensitive' as const } },
+            {
+              lots: {
+                some: {
+                  OR: [
+                    {
+                      productName: {
+                        contains: q,
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                    {
+                      lotNumber: { contains: q, mode: 'insensitive' as const },
+                    },
+                    {
+                      supplierName: {
+                        contains: q,
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                    {
+                      stockType: { contains: q, mode: 'insensitive' as const },
+                    },
+                    {
+                      productType: {
+                        contains: q,
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        }
+      : {};
+
     return this.prismaService.delivery.findMany({
+      where,
       include: { lots: true },
       orderBy: { createdAt: 'desc' },
     });
   }
 
   async findOne(id: string) {
-    return this.prismaService.delivery.findUnique({
+    const delivery = await this.prismaService.delivery.findUnique({
       where: { id },
       include: { lots: true },
     });
+
+    if (!delivery) {
+      throw new NotFoundException(`Delivery with ID ${id} not found`);
+    }
+
+    return delivery;
   }
 
   async update(id: string, updateDeliveryDto: CreateDeliveryDto) {
@@ -97,12 +142,13 @@ export class DeliveriesService {
 
     return this.prismaService.$transaction(async (tx) => {
       // Reverse old stock: remove stock for each existing lot
+      // PEAT uses pooled lot number and stock type
       for (const lot of existing.lots) {
         await this.stockService.removeStock(
           {
-            lotNumber: lot.lotNumber,
+            lotNumber: lot.productType === 'PEAT' ? 'PEAT' : lot.lotNumber,
             productType: lot.productType,
-            stockType: lot.stockType,
+            stockType: lot.productType === 'PEAT' ? 'GENERIC' : lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
@@ -128,7 +174,6 @@ export class DeliveriesService {
               productType: lot.productType,
               productName: lot.productName,
               supplierName: lot.supplierName,
-              remark: lot.remark,
             })),
           },
         },
@@ -138,9 +183,9 @@ export class DeliveriesService {
       for (const lot of updated.lots) {
         await this.stockService.addStock(
           {
-            lotNumber: lot.lotNumber,
+            lotNumber: lot.productType === 'PEAT' ? 'PEAT' : lot.lotNumber,
             productType: lot.productType,
-            stockType: lot.stockType,
+            stockType: lot.productType === 'PEAT' ? 'GENERIC' : lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,
@@ -167,12 +212,13 @@ export class DeliveriesService {
 
     return this.prismaService.$transaction(async (tx) => {
       // Reverse stock for each lot
+      // PEAT uses pooled lot number and stock type
       for (const lot of existing.lots) {
         await this.stockService.removeStock(
           {
-            lotNumber: lot.lotNumber,
+            lotNumber: lot.productType === 'PEAT' ? 'PEAT' : lot.lotNumber,
             productType: lot.productType,
-            stockType: lot.stockType,
+            stockType: lot.productType === 'PEAT' ? 'GENERIC' : lot.stockType,
             quantity: lot.quantity,
             referenceId: lot.id,
             referenceType: ReferenceType.DELIVERY,

@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Delete,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { DeliveriesService } from './deliveries.service';
@@ -27,8 +28,8 @@ export class DeliveriesController {
 
   @Get()
   @RequirePermissions('deliveries.view')
-  findAll() {
-    return this.deliveriesService.findAll();
+  findAll(@Query('q') q?: string) {
+    return this.deliveriesService.findAll(q);
   }
 
   @Get(':id')

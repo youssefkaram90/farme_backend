@@ -1,6 +1,4 @@
 import {
-
-  
   HttpException,
   HttpStatus,
   Injectable,
@@ -50,21 +48,29 @@ export class UsersService {
     }
   }
 
-  async getUsers(){
+  async getUsers(q?: string) {
+    const where = q
+      ? {
+          OR: [
+            { name: { contains: q, mode: 'insensitive' as const } },
+            { lastName: { contains: q, mode: 'insensitive' as const } },
+            { role: { contains: q, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
 
     return this.prismaService.user.findMany({
-      omit:{
-        password:true,
-      }
+      where,
+      omit: {
+        password: true,
+      },
     });
   }
 
-  async updateUser(where:UserWhereInput,data:UserUpdateInput){
-
+  async updateUser(where: UserWhereInput, data: UserUpdateInput) {
     return this.prismaService.user.updateMany({
       where,
       data,
-    })
-
+    });
   }
 }

@@ -4,6 +4,7 @@ import {
   Post,
   Body,
   Param,
+  ParseUUIDPipe,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -34,7 +35,7 @@ export class PermissionsController {
   @Get('users/:userId')
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions('permissions.view')
-  getUserPermissions(@Param('userId') userId: string) {
+  getUserPermissions(@Param('userId', ParseUUIDPipe) userId: string) {
     return this.permissionsService.getUserPermissions(userId);
   }
 
@@ -46,7 +47,7 @@ export class PermissionsController {
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions('permissions.manage')
   setUserPermissions(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body('permissionIds') permissionIds: string[],
   ) {
     return this.permissionsService.setUserPermissions(userId, permissionIds);

@@ -5,6 +5,7 @@ import {
   Body,
   Param,
   Patch,
+  Query,
   UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
@@ -25,6 +26,8 @@ export class UsersController {
   ) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions('users.create')
   create(@Body() createUserDto: CreateUserDto) {
     return this.usersService.create(createUserDto);
   }
@@ -32,8 +35,8 @@ export class UsersController {
   @Get()
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions('users.view')
-  getUsers() {
-    return this.usersService.getUsers();
+  getUsers(@Query('q') q?: string) {
+    return this.usersService.getUsers(q);
   }
 
   @Get('me')

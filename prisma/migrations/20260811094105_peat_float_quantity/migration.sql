@@ -1,0 +1,6 @@
+-- AlterTable
+ALTER TABLE "StockItem" ALTER COLUMN "currentQuantity" SET DEFAULT 0,
+ALTER COLUMN "currentQuantity" SET DATA TYPE DOUBLE PRECISION;
+
+-- AlterTable
+ALTER TABLE "StockMovement" ALTER COLUMN "quantity" SET DATA TYPE DOUBLE PRECISION;

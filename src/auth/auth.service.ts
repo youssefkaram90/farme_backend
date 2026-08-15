@@ -98,7 +98,7 @@ export class AuthService {
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresRefreshToken,
       sameSite: 'lax',
-      path: '/auth/refresh',
+      path: '/',
     });
 
     response.json({ id: user.id, accessToken, refreshToken });
@@ -123,7 +123,8 @@ export class AuthService {
         where: { jti },
       });
 
-      if (!tokenRecord) throw new UnauthorizedException('Refresh token not valid');
+      if (!tokenRecord)
+        throw new UnauthorizedException('Refresh token not valid');
 
       if (tokenRecord.revokedAt) {
         // Reuse detection: this token was already rotated, revoke the entire family
@@ -151,7 +152,10 @@ export class AuthService {
         data: { lastUsedAt: new Date() },
       });
 
-      return { user: await this.userService.getUser({ id: tokenRecord.userId }), tokenRecord };
+      return {
+        user: await this.userService.getUser({ id: tokenRecord.userId }),
+        tokenRecord,
+      };
     } catch (error) {
       throw new UnauthorizedException('Refresh token not valid');
     }
@@ -243,7 +247,7 @@ export class AuthService {
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresRefreshToken,
       sameSite: 'lax',
-      path: '/auth/refresh',
+      path: '/',
     });
 
     return { accessToken, refreshToken };

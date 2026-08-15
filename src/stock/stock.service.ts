@@ -127,6 +127,13 @@ export class StockService {
 
     const client = tx ?? this.prismaService;
 
+    // When no external transaction, wrap in internal tx for atomicity
+    if (!tx) {
+      return this.prismaService.$transaction(async (c) => {
+        return this.removeStock(params, c);
+      });
+    }
+
     const stockItem = await client.stockItem.findUnique({
       where: {
         productType_stockType_lotNumber: {
@@ -162,8 +169,21 @@ export class StockService {
     return updated;
   }
 
-  async findAll() {
+  async findAll(q?: string) {
+    const where = q
+      ? {
+          OR: [
+            { productName: { contains: q, mode: 'insensitive' as const } },
+            { lotNumber: { contains: q, mode: 'insensitive' as const } },
+            { supplierName: { contains: q, mode: 'insensitive' as const } },
+            { productType: { contains: q, mode: 'insensitive' as const } },
+            { stockType: { contains: q, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+
     return this.prismaService.stockItem.findMany({
+      where,
       orderBy: [{ productType: 'asc' }, { lotNumber: 'asc' }],
     });
   }

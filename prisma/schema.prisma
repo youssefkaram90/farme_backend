@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider     = "prisma-client"
   output       = "../src/generated/prisma"
@@ -24,13 +19,13 @@ model User {
   updatedAt DateTime @updatedAt
 
   refreshTokens RefreshToken[]
-  permissions  UserPermission[]
+  permissions   UserPermission[]
 }
 
 /// Available permissions in the system (e.g. "sowing.view", "sowing.create")
 model Permission {
-  id          String           @id @default(uuid())
-  name        String           @unique
+  id          String  @id @default(uuid())
+  name        String  @unique
   description String?
 
   createdAt DateTime @default(now())
@@ -91,6 +86,7 @@ model Delivery {
 
   deliveryDate DateTime
   deliveryCode String
+  remark       String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -98,10 +94,9 @@ model Delivery {
 }
 
 model DeliveryLot {
-  id         String   @id @default(uuid())
-  deliveryId String
-  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
-
+  id                   String   @id @default(uuid())
+  deliveryId           String
+  delivery             Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
   productName          String
   stockType            String // 'BIO' | 'CVT'
   productType          String // 'SEEDS' | 'PEAT'
@@ -109,7 +104,6 @@ model DeliveryLot {
   quantity             Int
   thousandSeedsPerGram Float?
   supplierName         String
-  remark               String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -124,7 +118,7 @@ model StockItem {
   lotNumber       String
   productName     String
   supplierName    String
-  currentQuantity Int    @default(0)
+  currentQuantity Float  @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -139,7 +133,7 @@ model StockMovement {
   stockItemId String
   stockItem   StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
 
-  quantity      Int // positive = in, negative = out
+  quantity      Float // positive = in, negative = out
   referenceType String // 'delivery', 'sowing'
   referenceId   String?
 
@@ -149,52 +143,251 @@ model StockMovement {
   @@index([referenceType, referenceId])
 }
 
-model Sowing {
-  id           String   @id @default(uuid())
-  variety      String
-  sowingDate   DateTime
-  sowingType   String // 'TUNNEL(SSM => superseedling morocco)' | 'FIELD(LPM => looseplant morocco)'
-  lotNumber    String
-  productType  String // 'SEEDS' | 'PEAT'
-  stockType    String // 'CVT' | 'BIO'
-  quantityUsed Int
+// ============================================================
+// TUNNELS & SECTORS (physical locations for sowing)
+// ============================================================
 
-  /// Number of trays used (only for GREENHOUSE sowings)
-  numberOfTrays Int?
-  /// Seeds per tray (default 285, only for GREENHOUSE sowings)
-  seedsPerTray  Int?
+model Tunnel {
+  id       String  @id @default(uuid())
+  number   String  @unique
+  location String?
+  capacity Int
 
-  remarks String?
+  ssmSowings              SowingSSM[]
+  sowingTunnelAssignments SowingTunnelAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Sector {
+  id       String  @id @default(uuid())
+  name     String
+  location String?
+
+  lpmSowings        SowingLPM[]
+  sowingPlanEntries SowingPlanEntry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  plantStock PlantStock?
+  @@unique([location, name])
 }
 
-model PlantStock {
-  id       String @id @default(uuid())
-  sowingId String @unique
-  sowing   Sowing @relation(fields: [sowingId], references: [id], onDelete: Cascade)
+// ============================================================
+// SOWING PLANS (imported from client Excel)
+// ============================================================
+
+model SowingPlan {
+  id       String  @id @default(uuid())
+  planType String // 'SSM' | 'LPM'
+  name     String  @unique
+  location String?
+  status   String  @default("DRAFT") // 'DRAFT' | 'IN_PROGRESS' | 'COMPLETED'
+
+  entries    SowingPlanEntry[]
+  ssmSowings SowingSSM[]
+  lpmSowings SowingLPM[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SowingPlanEntry {
+  id     String     @id @default(uuid())
+  planId String
+  plan   SowingPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
 
   variety   String
-  location  String // 'TUNNEL' | 'FIELD'
+  stockType String // 'BIO' | 'CVT'
+  peat      String? // SSM only: peat/trail details, e.g. "50% CVT 50% BIO"
+  status    String  @default("PLANNED") // 'PLANNED' | 'EXECUTED'
+
+  plannedDate DateTime
+
+  // --- SSM fields ---
+  plannedTrays Int?
+
+  // --- LPM fields ---
+  plannedQuantity Int?
+  sectorId        String?
+  sector          Sector? @relation(fields: [sectorId], references: [id])
+  lines           String?
+  metersPerLine   Float?
+  seedsPerMeter   Int?
+
+  // --- Execution progress ---
+  executedTrays    Int? @default(0)
+  executedQuantity Int? @default(0)
+
+  // --- Link to executed sowings (1:N — multiple executions per entry) ---
+  ssmSowings SowingSSM[]
+  lpmSowings SowingLPM[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([planId])
+  @@index([status])
+}
+
+// ============================================================
+// SOWING SSM — Tunnel / Tray-based sowing
+// ============================================================
+
+model SowingSSM {
+  id          String           @id @default(uuid())
+  planId      String
+  plan        SowingPlan       @relation(fields: [planId], references: [id])
+  planEntryId String?
+  planEntry   SowingPlanEntry? @relation(fields: [planEntryId], references: [id])
+
+  variety     String
+  sowingDate  DateTime
+  lotNumber   String
+  stockType   String // 'BIO' | 'CVT'
+  productType String // 'SEEDS' | 'PEAT'
+
+  numberOfTrays Int
+  seedsPerTray  Int @default(285)
+  quantityUsed  Int // numberOfTrays × seedsPerTray
+
+  tunnelId     String?
+  tunnelNumber String? // denormalized: "T1", "T2" — for UI display
+  tunnel       Tunnel? @relation(fields: [tunnelId], references: [id])
+
+  remarks String?
+
+  plantStock PlantStock?
+
+  tunnelAssignments SowingTunnelAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tunnelId])
+  @@index([planId])
+}
+
+// ============================================================
+// SOWING LPM — Field / Sector-based sowing
+// ============================================================
+
+model SowingLPM {
+  id          String           @id @default(uuid())
+  planId      String
+  plan        SowingPlan       @relation(fields: [planId], references: [id])
+  planEntryId String?
+  planEntry   SowingPlanEntry? @relation(fields: [planEntryId], references: [id])
+
+  variety     String
+  sowingDate  DateTime
+  lotNumber   String
+  stockType   String // 'BIO' | 'CVT'
+  productType String // 'SEEDS' | 'PEAT'
+
+  quantityUsed Int
+
+  sectorId String?
+  sector   Sector? @relation(fields: [sectorId], references: [id])
+
+  lines         String?
+  metersPerLine Float?
+  seedsPerMeter Int?
+
+  remarks String?
+
+  plantStock PlantStock?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([sectorId])
+  @@index([planId])
+}
+
+// ============================================================
+// PLANT STOCK — Plants created after sowing
+// ============================================================
+
+model PlantStock {
+  id          String     @id @default(uuid())
+  ssmSowingId String?    @unique
+  ssmSowing   SowingSSM? @relation(fields: [ssmSowingId], references: [id], onDelete: Cascade)
+  lpmSowingId String?    @unique
+  lpmSowing   SowingLPM? @relation(fields: [lpmSowingId], references: [id], onDelete: Cascade)
+
+  variety   String
+  location  String // tunnel number for SSM, sector name for LPM
   lotNumber String
   stockType String // 'CVT' | 'BIO'
 
-  /// For greenhouse: number of trays. For field: null.
-  numberOfTrays  Int?
-  /// For greenhouse: seeds per tray. For field: null.
-  seedsPerTray   Int?
-  /// Expected number of plants (for greenhouse: trays * seedsPerTray; for field: quantityUsed)
+  // SSM
+  numberOfTrays Int?
+  seedsPerTray  Int?
+  // LPM
+  lines         String?
+  metersPerLine Float?
+  seedsPerMeter Int?
+
   expectedPlants Int
 
-  /// Current stage of the plants (e.g., SEEDLING, GROWING, FLOWERING, HARVESTED)
+  seedsSown Int @default(0) // actual seeds sown (= quantityUsed at creation)
+
   currentStage String @default("SEEDLING")
+
+  counts PlantCount[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([location])
   @@index([variety])
+}
+
+// ============================================================
+// PLANT COUNT — Sample-based counting (trays for SSM, meters for LPM)
+// ============================================================
+
+model PlantCount {
+  id           String     @id @default(uuid())
+  plantStockId String
+  plantStock   PlantStock @relation(fields: [plantStockId], references: [id], onDelete: Cascade)
+
+  countType       String // 'TRAY' | 'METER'
+  sampleSize      Float // trays or meters sampled
+  countedPlants   Int // plants counted in the sample
+  density         Float // plants per tray / per meter (computed)
+  estimatedPlants Int // extrapolated to the whole batch (computed)
+  germinationRate Float? // estimatedPlants / seedsSown * 100 (computed)
+
+  countDate DateTime @default(now())
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([plantStockId])
+}
+
+// ============================================================
+// TUNNEL ASSIGNMENTS — Many-to-many trays → tunnels
+// ============================================================
+
+model SowingTunnelAssignment {
+  id          String    @id @default(uuid())
+  ssmSowingId String
+  ssmSowing   SowingSSM @relation(fields: [ssmSowingId], references: [id], onDelete: Cascade)
+  tunnelId    String
+  tunnel      Tunnel    @relation(fields: [tunnelId], references: [id], onDelete: Cascade)
+
+  numberOfTrays Int // how many trays from this sowing go to this tunnel
+  transportDate DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([ssmSowingId, tunnelId])
+  @@index([ssmSowingId])
+  @@index([tunnelId])
 }

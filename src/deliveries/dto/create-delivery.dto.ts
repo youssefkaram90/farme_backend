@@ -1,4 +1,4 @@
-import {IsArray, ValidateNested, IsDateString, IsString, IsNotEmpty } from 'class-validator';
+import {IsArray, ValidateNested, IsDateString, IsString, IsNotEmpty, IsOptional } from 'class-validator';
 import { Type } from 'class-transformer';
 import { LotsDto } from './lots.dto';
 
@@ -11,6 +11,10 @@ export class CreateDeliveryDto {
   @IsString()
   @IsNotEmpty()
   deliveryCode!:string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
 
   @IsArray()
   @ValidateNested({ each: true })
