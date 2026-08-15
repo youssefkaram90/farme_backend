@@ -5,7 +5,14 @@ import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { DeliveriesModule } from './deliveries/deliveries.module';
 import { StockModule } from './stock/stock.module';
-import { SowingModule } from './sowing/sowing.module';
+import { PermissionsModule } from './permissions/permissions.module';
+import { TunnelsModule } from './tunnels/tunnels.module';
+import { SectorsModule } from './sectors/sectors.module';
+import { SowingPlanModule } from './sowing-plan/sowing-plan.module';
+import { SowingSSMModule } from './sowing-ssm/sowing-ssm.module';
+import { SowingLPMModule } from './sowing-lpm/sowing-lpm.module';
+import { TrayTransportModule } from './tray-transport/tray-transport.module';
+import { PlantStockModule } from './plant-stock/plant-stock.module';
 
 @Module({
   imports: [
@@ -14,7 +21,14 @@ import { SowingModule } from './sowing/sowing.module';
     PrismaModule,
     DeliveriesModule,
     StockModule,
-    SowingModule,
+    PermissionsModule,
+    TunnelsModule,
+    SectorsModule,
+    SowingPlanModule,
+    SowingSSMModule,
+    SowingLPMModule,
+    TrayTransportModule,
+    PlantStockModule,
     ConfigModule.forRoot({ isGlobal: true }),
   ],
 })

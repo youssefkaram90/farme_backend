@@ -63,7 +63,7 @@ export class AuthController {
     }
 
     response.clearCookie('Authentication');
-    response.clearCookie('Refresh', { path: '/auth/refresh' });
+    response.clearCookie('Refresh', { path: '/' });
     return { message: 'signed out' };
   }
 
@@ -75,7 +75,7 @@ export class AuthController {
   ) {
     await this.authService.signoutAll(user.id);
     response.clearCookie('Authentication');
-    response.clearCookie('Refresh', { path: '/auth/refresh' });
+    response.clearCookie('Refresh', { path: '/' });
     return { message: 'Logged out from all devices' };
   }
 }

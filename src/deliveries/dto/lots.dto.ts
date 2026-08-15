@@ -34,7 +34,5 @@ export class LotsDto {
   @IsNotEmpty()
   supplierName!: string;
 
-  @IsOptional()
-  @IsString()
-  remark?: string;
+  
 }

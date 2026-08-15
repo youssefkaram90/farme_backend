@@ -1,4 +1,4 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { StockService } from './stock.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
@@ -8,8 +8,8 @@ export class StockController {
   constructor(private readonly stockService: StockService) {}
 
   @Get()
-  findAll() {
-    return this.stockService.findAll();
+  findAll(@Query('q') q?: string) {
+    return this.stockService.findAll(q);
   }
 
   @Get('summary')
