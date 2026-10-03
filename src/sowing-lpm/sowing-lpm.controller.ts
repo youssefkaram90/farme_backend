@@ -11,35 +11,55 @@ import {
 } from '@nestjs/common';
 import { SowingLPMService } from './sowing-lpm.service';
 import { ExecuteLPMDto } from './dto/execute-lpm.dto';
+import { UpdateLPMDto } from './dto/update-lpm.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../permissions/guards/permissions.guard';
+import { RequirePermissions } from '../permissions/decorators/require-permissions.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { User } from '../generated/prisma/client';
 
 @Controller('sowing-lpm')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 export class SowingLPMController {
   constructor(private readonly sowingLPMService: SowingLPMService) {}
 
   @Post('execute')
-  execute(@Body() dto: ExecuteLPMDto) {
-    return this.sowingLPMService.execute(dto);
+  @RequirePermissions('sowing.create')
+  execute(@Body() dto: ExecuteLPMDto, @CurrentUser() user: User) {
+    return this.sowingLPMService.execute(dto, user);
   }
 
   @Get()
-  findAll(@Query('q') q?: string, @Query('planId') planId?: string) {
-    return this.sowingLPMService.findAll(q, planId);
+  @RequirePermissions('sowing.view')
+  findAll(
+    @Query('q') q?: string,
+    @Query('planId') planId?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.sowingLPMService.findAll(q, planId, page, pageSize);
   }
 
   @Get(':id')
+  @RequirePermissions('sowing.view')
   findOne(@Param('id') id: string) {
     return this.sowingLPMService.findOne(id);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: ExecuteLPMDto) {
-    return this.sowingLPMService.update(id, dto);
+  @RequirePermissions('sowing.edit')
+  update(
+    @Param('id') id: string,
+    // Every field optional: PATCH does not demand the create fields (SSM-03).
+    @Body() dto: UpdateLPMDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.sowingLPMService.update(id, dto, user);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.sowingLPMService.remove(id);
+  @RequirePermissions('sowing.delete')
+  remove(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.sowingLPMService.remove(id, user);
   }
 }

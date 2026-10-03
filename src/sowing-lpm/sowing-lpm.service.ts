@@ -4,18 +4,33 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '../generated/prisma/client';
 import { StockService } from '../stock/stock.service';
 import { ReferenceType } from '../stock/enums/reference-type.enum';
 import { ExecuteLPMDto } from './dto/execute-lpm.dto';
+import { UpdateLPMDto } from './dto/update-lpm.dto';
+import { getPaginationParams } from '../common/pagination';
+import {
+  deriveSeedsPerRowMetre,
+  sameVariety,
+} from '../common/sowing.constants';
+import {
+  assertEntrySowable,
+  syncPlanEntryProgress,
+} from '../sowing-plan/plan-entry-progress';
+import { SeasonService } from '../season/season.service';
+import type { Actor } from '../common/actor';
+import { ERROR_MESSAGES } from '../common/error-messages';
 
 @Injectable()
 export class SowingLPMService {
   constructor(
     private prismaService: PrismaService,
     private stockService: StockService,
+    private seasonService: SeasonService,
   ) {}
 
-  async execute(dto: ExecuteLPMDto) {
+  async execute(dto: ExecuteLPMDto, actor: Actor) {
     const {
       planId,
       planEntryId,
@@ -26,25 +41,42 @@ export class SowingLPMService {
       quantityUsed,
       sowingDate,
       lines,
-      metersPerLine,
-      seedsPerMeter,
+      meterPerLine,
       remarks,
     } = dto;
-
+    const seedsPerMeter = deriveSeedsPerRowMetre(
+      quantityUsed,
+      lines,
+      meterPerLine,
+    );
     let stockType: string;
     let sectorId: string | undefined = dtoSectorId;
 
     // 1. Validate plan exists
     const plan = await this.prismaService.sowingPlan.findUnique({
       where: { id: planId },
+      include: { season: { select: { code: true } } },
     });
 
     if (!plan) {
-      throw new NotFoundException(`Plan with ID ${planId} not found`);
+      throw new NotFoundException('This plan no longer exists.');
+    }
+
+    // A sowing is ALWAYS filed into the open season, so executing a plan from
+    // another season would split the plan's numbers and the sowing's numbers
+    // across two seasons, with nothing on screen saying so (SSM-01). Not a
+    // permission question, so no administrator exemption: the record would be
+    // wrong for whoever created it.
+    if (plan.seasonId !== this.seasonService.getActiveSeasonId()) {
+      throw new BadRequestException(
+        `This plan belongs to season ${plan.season.code}, which is not the open season. A sowing is always recorded in the open season — use a plan from the current season.`,
+      );
     }
 
     if (plan.planType !== 'LPM') {
-      throw new BadRequestException(`Plan ${planId} is not an LPM plan`);
+      throw new BadRequestException(
+        'This is a tunnel (SSM) plan. Please choose a field (LPM) plan.',
+      );
     }
 
     // 2. Validate plan entry if provided — auto-fill from entry
@@ -55,20 +87,23 @@ export class SowingLPMService {
       });
 
       if (!planEntry) {
-        throw new NotFoundException(
-          `Plan entry with ID ${planEntryId} not found`,
-        );
+        throw new NotFoundException('This plan entry no longer exists.');
       }
 
       if (planEntry.planId !== planId) {
         throw new BadRequestException(
-          `Plan entry ${planEntryId} does not belong to plan ${planId}`,
+          'This plan entry does not belong to the selected plan.',
         );
       }
 
-      if (planEntry.status === 'EXECUTED') {
+      // Refuses an entry that is already fully sown, one an administrator closed
+      // on purpose, and a plan declared complete — the same shared rule in both
+      // sowing paths (SPLAN-02).
+      assertEntrySowable(planEntry, planEntry.plan.status);
+
+      if (!sameVariety(planEntry.variety, variety)) {
         throw new BadRequestException(
-          `Plan entry ${planEntryId} is already fully executed`,
+          `This entry must be sown with the planned variety "${planEntry.variety}".`,
         );
       }
 
@@ -91,10 +126,10 @@ export class SowingLPMService {
 
     // 3. Validate LPM-specific fields
     if (!lines) {
-      throw new BadRequestException('LPM sowings require lines');
+      throw new BadRequestException('Please enter the number of lines.');
     }
-    if (!metersPerLine) {
-      throw new BadRequestException('LPM sowings require metersPerLine');
+    if (!meterPerLine) {
+      throw new BadRequestException('Please enter the length of the lines.');
     }
 
     // 4. Validate sector if sectorId is provided
@@ -105,10 +140,14 @@ export class SowingLPMService {
       });
 
       if (!sector) {
-        throw new NotFoundException(`Sector with ID ${sectorId} not found`);
+        throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
       }
       sectorName = sector.name;
     }
+
+    // The sowing date must belong to the season this sowing is filed into
+    // (SEASON-08).
+    await this.seasonService.assertDateInSeason(sowingDate, 'sowing date');
 
     // 3. Transaction: deduct stock + create sowing + create plantStock
     return this.prismaService.$transaction(async (tx) => {
@@ -121,6 +160,7 @@ export class SowingLPMService {
           quantity: quantityUsed,
           referenceId: planEntryId ?? undefined,
           referenceType: ReferenceType.SOWING,
+          createdByName: actor.name,
         },
         tx,
       );
@@ -128,6 +168,7 @@ export class SowingLPMService {
       // Create SowingLPM
       const sowing = await tx.sowingLPM.create({
         data: {
+          seasonId: this.seasonService.getActiveSeasonId(),
           planId,
           planEntryId: planEntryId ?? null,
           variety,
@@ -138,7 +179,7 @@ export class SowingLPMService {
           quantityUsed,
           sectorId,
           lines,
-          metersPerLine,
+          meterPerLine,
           seedsPerMeter,
           remarks,
         },
@@ -153,7 +194,7 @@ export class SowingLPMService {
           lotNumber,
           stockType: stockType,
           lines,
-          metersPerLine,
+          meterPerLine,
           seedsPerMeter,
           expectedPlants: quantityUsed,
           seedsSown: quantityUsed,
@@ -163,31 +204,7 @@ export class SowingLPMService {
 
       // Update plan entry progress (if from a plan)
       if (planEntryId) {
-        const entry = await tx.sowingPlanEntry.findUnique({
-          where: { id: planEntryId },
-        });
-
-        if (entry) {
-          const newExecutedQty = (entry.executedQuantity ?? 0) + quantityUsed;
-          const plannedQty = entry.plannedQuantity ?? 0;
-
-          let newStatus: string;
-          if (plannedQty > 0 && newExecutedQty >= plannedQty) {
-            newStatus = 'EXECUTED';
-          } else if (newExecutedQty > 0) {
-            newStatus = 'PARTIALLY_EXECUTED';
-          } else {
-            newStatus = 'PLANNED';
-          }
-
-          await tx.sowingPlanEntry.update({
-            where: { id: planEntryId },
-            data: {
-              executedQuantity: newExecutedQty,
-              status: newStatus,
-            },
-          });
-        }
+        await syncPlanEntryProgress(tx, planEntryId);
       }
 
       return tx.sowingLPM.findUnique({
@@ -200,8 +217,15 @@ export class SowingLPMService {
     });
   }
 
-  async findAll(q?: string, planId?: string) {
-    const where: any = {};
+  async findAll(q?: string, planId?: string, page?: string, pageSize?: string) {
+    // Typed, not `any`: the `any` is what let an invalid filter live here —
+    // `lines` is an `Int?` and was being searched with `contains` and
+    // `mode: 'insensitive'`, which Prisma refuses for a number, so any search
+    // text that reached this query killed the whole list request instead of
+    // returning rows (LPM-01).
+    const where: Prisma.SowingLPMWhereInput = {
+      seasonId: this.seasonService.getActiveSeasonId(),
+    };
 
     if (planId) {
       where.planId = planId;
@@ -213,9 +237,35 @@ export class SowingLPMService {
         { lotNumber: { contains: q, mode: 'insensitive' as const } },
         { stockType: { contains: q, mode: 'insensitive' as const } },
         { remarks: { contains: q, mode: 'insensitive' as const } },
-        { lines: { contains: q, mode: 'insensitive' as const } },
         { sector: { name: { contains: q, mode: 'insensitive' as const } } },
       ];
+    }
+
+    const pagination = getPaginationParams(page, pageSize);
+
+    if (pagination) {
+      const [total, items] = await Promise.all([
+        this.prismaService.sowingLPM.count({ where }),
+        this.prismaService.sowingLPM.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip: pagination.skip,
+          take: pagination.take,
+          include: {
+            plantStock: true,
+            sector: true,
+            plan: true,
+          },
+        }),
+      ]);
+
+      return {
+        items,
+        total,
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+        hasMore: pagination.page * pagination.pageSize < total,
+      };
     }
 
     return this.prismaService.sowingLPM.findMany({
@@ -240,14 +290,49 @@ export class SowingLPMService {
     });
 
     if (!sowing) {
-      throw new NotFoundException(`LPM Sowing with ID ${id} not found`);
+      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
     }
 
     return sowing;
   }
 
-  async update(id: string, dto: ExecuteLPMDto) {
+  async update(id: string, dto: UpdateLPMDto, actor: Actor) {
     const existing = await this.findOne(id);
+
+    // Every field is optional now (SSM-03), so "not sent" must mean "keep",
+    // never "write undefined". The sector is the one field that can be cleared
+    // deliberately, by sending `null`.
+    const variety = dto.variety ?? existing.variety;
+    const lotNumber = dto.lotNumber ?? existing.lotNumber;
+    const quantityUsed = dto.quantityUsed ?? existing.quantityUsed;
+    const sowingDate = dto.sowingDate ?? existing.sowingDate;
+    const lines = dto.lines ?? existing.lines;
+    const meterPerLine = dto.meterPerLine ?? existing.meterPerLine;
+    const remarks = dto.remarks === undefined ? existing.remarks : dto.remarks;
+
+    const sectorChanged = dto.sectorId !== undefined;
+    const sectorId = sectorChanged ? dto.sectorId : existing.sectorId;
+
+    if (existing.planEntryId) {
+      const planEntry = await this.prismaService.sowingPlanEntry.findUnique({
+        where: { id: existing.planEntryId },
+      });
+      if (planEntry && !sameVariety(planEntry.variety, variety)) {
+        throw new BadRequestException(
+          `Variety "${variety}" does not match the plan entry variety "${planEntry.variety}"`,
+        );
+      }
+    }
+
+    // The sector row is needed for its NAME: the plant stock row stores the
+    // sector name as its location.
+    const sector = sectorId
+      ? await this.prismaService.sector.findUnique({ where: { id: sectorId } })
+      : null;
+
+    if (sectorId && !sector) {
+      throw new NotFoundException('This sector no longer exists.');
+    }
 
     return this.prismaService.$transaction(async (tx) => {
       // Reverse old stock
@@ -259,6 +344,9 @@ export class SowingLPMService {
           quantity: existing.quantityUsed,
           referenceId: existing.planEntryId ?? existing.id,
           referenceType: ReferenceType.SOWING,
+          // The sowing's own season, not the open one (DELIV-07).
+          seasonId: existing.seasonId,
+          createdByName: actor.name,
         },
         tx,
       );
@@ -266,12 +354,14 @@ export class SowingLPMService {
       // Apply new stock deduction
       await this.stockService.removeStock(
         {
-          lotNumber: dto.lotNumber,
+          lotNumber,
           productType: 'SEEDS',
           stockType: existing.stockType,
-          quantity: dto.quantityUsed,
+          quantity: quantityUsed,
           referenceId: existing.planEntryId ?? existing.id,
           referenceType: ReferenceType.SOWING,
+          seasonId: existing.seasonId,
+          createdByName: actor.name,
         },
         tx,
       );
@@ -280,36 +370,51 @@ export class SowingLPMService {
       await tx.sowingLPM.update({
         where: { id },
         data: {
-          variety: dto.variety,
-          sowingDate: dto.sowingDate,
-          lotNumber: dto.lotNumber,
-          quantityUsed: dto.quantityUsed,
-          sectorId: dto.sectorId,
-          lines: dto.lines,
-          metersPerLine: dto.metersPerLine,
-          seedsPerMeter: dto.seedsPerMeter,
-          remarks: dto.remarks,
+          variety,
+          sowingDate,
+          lotNumber,
+          quantityUsed,
+          lines,
+          meterPerLine,
+          seedsPerMeter: deriveSeedsPerRowMetre(
+            quantityUsed,
+            lines,
+            meterPerLine,
+          ),
+          remarks,
+          // `undefined` leaves the column alone; `null` takes the sowing out of
+          // its sector.
+          sectorId: sectorChanged ? sectorId : undefined,
         },
-      });
-
-      // Update plant stock
-      const sector = await tx.sector.findUnique({
-        where: { id: dto.sectorId },
       });
 
       if (existing.plantStock) {
         await tx.plantStock.update({
           where: { id: existing.plantStock.id },
           data: {
-            variety: dto.variety,
-            location: sector?.name ?? existing.plantStock.location,
-            lotNumber: dto.lotNumber,
-            lines: dto.lines,
-            metersPerLine: dto.metersPerLine,
-            seedsPerMeter: dto.seedsPerMeter,
-            expectedPlants: dto.quantityUsed,
+            variety,
+            location: sectorChanged
+              ? (sector?.name ?? existing.plantStock.location)
+              : existing.plantStock.location,
+            lotNumber,
+            lines,
+            meterPerLine,
+            seedsPerMeter: deriveSeedsPerRowMetre(
+              quantityUsed,
+              lines,
+              meterPerLine,
+            ),
+            // Both move together: `seedsSown` is the denominator of every
+            // germination figure, so leaving it behind made the counts describe
+            // a sowing that no longer existed (SSM-05, same defect as SSM).
+            expectedPlants: quantityUsed,
+            seedsSown: quantityUsed,
           },
         });
+      }
+
+      if (existing.planEntryId) {
+        await syncPlanEntryProgress(tx, existing.planEntryId);
       }
 
       return tx.sowingLPM.findUnique({
@@ -319,7 +424,7 @@ export class SowingLPMService {
     });
   }
 
-  async remove(id: string) {
+  async remove(id: string, actor: Actor) {
     const existing = await this.findOne(id);
 
     return this.prismaService.$transaction(async (tx) => {
@@ -332,43 +437,22 @@ export class SowingLPMService {
           quantity: existing.quantityUsed,
           referenceId: existing.planEntryId ?? existing.id,
           referenceType: ReferenceType.SOWING,
+          // The sowing's own season, not the open one (DELIV-07).
+          seasonId: existing.seasonId,
+          createdByName: actor.name,
         },
         tx,
       );
 
       // Update plan entry progress (decrement executed count)
+
+      const deleted = await tx.sowingLPM.delete({ where: { id } });
+
       if (existing.planEntryId) {
-        const entry = await tx.sowingPlanEntry.findUnique({
-          where: { id: existing.planEntryId },
-        });
-
-        if (entry) {
-          const newExecutedQty = Math.max(
-            0,
-            (entry.executedQuantity ?? 0) - existing.quantityUsed,
-          );
-          const plannedQty = entry.plannedQuantity ?? 0;
-
-          let newStatus: string;
-          if (plannedQty > 0 && newExecutedQty >= plannedQty) {
-            newStatus = 'EXECUTED';
-          } else if (newExecutedQty > 0) {
-            newStatus = 'PARTIALLY_EXECUTED';
-          } else {
-            newStatus = 'PLANNED';
-          }
-
-          await tx.sowingPlanEntry.update({
-            where: { id: existing.planEntryId },
-            data: {
-              executedQuantity: newExecutedQty,
-              status: newStatus,
-            },
-          });
-        }
+        await syncPlanEntryProgress(tx, existing.planEntryId);
       }
 
-      return tx.sowingLPM.delete({ where: { id } });
+      return deleted;
     });
   }
 }

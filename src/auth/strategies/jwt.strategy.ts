@@ -26,6 +26,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: TokenPayload) {
-    return this.userService.getUser({ id: payload.sub });
+    // The SAFE fetch: the password hash has no business travelling on every
+    // request as `request.user` (X-09).
+    return this.userService.getUserSafe({ id: payload.sub });
   }
 }

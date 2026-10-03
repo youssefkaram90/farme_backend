@@ -11,6 +11,7 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { StockType } from '../../deliveries/enums/stock-type.enum';
+import { NormalizeName } from '../../common/normalize-name';
 
 export class ExecuteLPMDto {
   @IsUUID()
@@ -24,6 +25,7 @@ export class ExecuteLPMDto {
   @IsUUID()
   sectorId?: string;
 
+  @NormalizeName()
   @IsString()
   @IsNotEmpty()
   variety!: string;
@@ -46,13 +48,14 @@ export class ExecuteLPMDto {
   sowingDate!: Date;
 
   @IsOptional()
-  @IsString()
-  lines?: string;
+  @Type(() => Number)
+  @IsNumber()
+  lines?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
-  metersPerLine?: number;
+  meterPerLine?: number;
 
   @IsOptional()
   @Type(() => Number)
@@ -60,6 +63,7 @@ export class ExecuteLPMDto {
   @Min(1)
   seedsPerMeter?: number;
 
+  @NormalizeName()
   @IsOptional()
   @IsString()
   remarks?: string;

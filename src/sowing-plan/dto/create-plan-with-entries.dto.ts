@@ -9,15 +9,18 @@ import {
 } from 'class-validator';
 import { PlanType } from '../enums/plan-type.enum';
 import { CreatePlanEntryDto } from './create-plan-entry.dto';
+import { NormalizeName } from '../../common/normalize-name';
 
 export class CreatePlanWithEntriesDto {
   @IsEnum(PlanType)
   planType!: PlanType;
 
+  @NormalizeName()
   @IsString()
   @IsNotEmpty()
   name!: string;
 
+  @NormalizeName()
   @IsOptional()
   @IsString()
   location?: string;
