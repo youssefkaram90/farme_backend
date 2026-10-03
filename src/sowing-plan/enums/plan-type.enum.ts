@@ -13,4 +13,6 @@ export enum PlanEntryStatus {
   PLANNED = 'PLANNED',
   PARTIALLY_EXECUTED = 'PARTIALLY_EXECUTED',
   EXECUTED = 'EXECUTED',
+  /** Manually closed even though less than planned was executed. Final. */
+  CLOSED = 'CLOSED',
 }

@@ -28,14 +28,11 @@ export class AuthController {
   @UseGuards(JwtRefreshAuthGuard)
   async refreshToken(
     @CurrentUser()
-    user: {
-      user: User;
-      tokenRecord: { id: string; familyId: string; userId: string };
-    },
+    tokenRecord: { id: string; familyId: string; userId: string },
     @Res({ passthrough: true }) response: Response,
     @Req() request: Request,
   ) {
-    return this.authService.rotateRefreshToken(user.tokenRecord, response, {
+    return this.authService.rotateRefreshToken(tokenRecord, response, {
       userAgent: request.headers['user-agent'],
       ipAddress: request.ip,
     });
@@ -49,19 +46,17 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
     @Body('refreshToken') bodyRefreshToken?: string,
   ) {
-    // Extract the refresh token from: cookie (web) or request body (mobile)
+    // The refresh token comes from the cookie (web) or the body (mobile).
     const rawRefreshToken = request.cookies?.Refresh ?? bodyRefreshToken;
 
     if (rawRefreshToken) {
-      // Decode the JWT to get jti (without verifying — access token already verified by guard)
-      const payload = JSON.parse(
-        Buffer.from(rawRefreshToken.split('.')[1], 'base64').toString(),
-      );
-      if (payload.jti) {
-        await this.authService.signout(payload.jti);
-      }
+      // Verified inside, and only ever the caller's own token — anything else is
+      // ignored rather than crashed on (AUTH-01 / AUTH-03 / AUTH-07).
+      await this.authService.signoutByToken(rawRefreshToken, user.id);
     }
 
+    // Always cleared, whatever happened above: a sign-out that leaves the
+    // cookies behind is worse than one that reports a failure.
     response.clearCookie('Authentication');
     response.clearCookie('Refresh', { path: '/' });
     return { message: 'signed out' };

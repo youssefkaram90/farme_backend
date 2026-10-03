@@ -8,6 +8,43 @@ datasource db {
   provider = "postgresql"
 }
 
+model Season {
+  id String @id @default(uuid())
+
+  // Display code, 2-digite "25-26" = 1 Jul 2025 -> 30 Jun 2026
+  code String @unique
+
+  startDate DateTime
+  endDate   DateTime
+
+  status      String    @default("ACTIVE") // "ACTIVE" | "CLOSED"
+  activatedAt DateTime?
+  closedAt    DateTime?
+  createdBy   String?
+
+  // ---------- everything this season owns ----------
+  deliveries            Delivery[]
+  shipments             Shipment[]
+  harvestRecords        HarvestRecord[]
+  sowingPlans           SowingPlan[]
+  ssmSowings            SowingSSM[]
+  lpmSowings            SowingLPM[]
+  cropCarePlans         CropCarePlan[]
+  cropOperations        CropOperation[]
+  trucks                Truck[]
+  tunnels               Tunnel[]
+  sectors               Sector[]
+  stockItems            StockItem[]
+  harvestedProducts     HarvestedProduct[]
+  phytosanitaryPrograms PhytosanitaryProgram[]
+  agriInputSeasons      AgriInputSeason[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
 model User {
   id       String  @id @default(uuid())
   name     String  @unique
@@ -82,15 +119,19 @@ model RefreshToken {
 }
 
 model Delivery {
-  id String @id @default(uuid())
+  id       String @id @default(uuid())
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
 
   deliveryDate DateTime
   deliveryCode String
-  remark       String?
+  transport    String
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   lots DeliveryLot[]
+
+  @@unique([seasonId, deliveryCode])
 }
 
 model DeliveryLot {
@@ -104,6 +145,7 @@ model DeliveryLot {
   quantity             Int
   thousandSeedsPerGram Float?
   supplierName         String
+  remark               String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -113,6 +155,8 @@ model DeliveryLot {
 
 model StockItem {
   id              String @id @default(uuid())
+  seasonId        String
+  season          Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   productType     String // 'SEEDS' | 'PEAT'
   stockType       String // 'BIO' | 'CVT'
   lotNumber       String
@@ -125,7 +169,7 @@ model StockItem {
 
   movements StockMovement[]
 
-  @@unique([productType, stockType, lotNumber])
+  @@unique([seasonId, productType, stockType, lotNumber])
 }
 
 model StockMovement {
@@ -134,8 +178,23 @@ model StockMovement {
   stockItem   StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
 
   quantity      Float // positive = in, negative = out
-  referenceType String // 'delivery', 'sowing'
+  referenceType String // 'delivery' | 'sowing' | 'manual'
   referenceId   String?
+  /// Why a manual adjustment happened. Null for delivery/sowing movements.
+  reason        String? // 'opening' | 'returned_to_client' | 'waste' | 'correction'
+  note          String?
+
+  /// Who caused this movement — the user's **NAME**, not their id.
+  ///
+  /// A copy, deliberately: the ledger has to stay readable years later, and the
+  /// screen that shows it wants a word, not a uuid it would have to go and look
+  /// up. A snapshot also means a later rename cannot rewrite what the record
+  /// says about who did it.
+  ///
+  /// **Required, and required with no default**, so TypeScript refuses to write
+  /// a movement without an actor. `'Unknown'` appears only on rows that existed
+  /// before this column did — see the `add_ledger_actor` migration.
+  createdByName String
 
   createdAt DateTime @default(now())
 
@@ -148,30 +207,42 @@ model StockMovement {
 // ============================================================
 
 model Tunnel {
-  id       String  @id @default(uuid())
-  number   String  @unique
+  id String @id @default(uuid())
+
+  seasonId String
+  season   Season  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  number   String
   location String?
   capacity Int
 
   ssmSowings              SowingSSM[]
   sowingTunnelAssignments SowingTunnelAssignment[]
+  cropCarePlanLocations   CropCarePlanLocation[]
+  cropOperationLocations  CropOperationLocation[]
+  harvestRecords          HarvestRecord[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, number])
 }
 
 model Sector {
   id       String  @id @default(uuid())
+  seasonId String
+  season   Season  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   name     String
   location String?
 
-  lpmSowings        SowingLPM[]
-  sowingPlanEntries SowingPlanEntry[]
+  lpmSowings             SowingLPM[]
+  sowingPlanEntries      SowingPlanEntry[]
+  cropCarePlanLocations  CropCarePlanLocation[]
+  cropOperationLocations CropOperationLocation[]
+  harvestRecords         HarvestRecord[]
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([location, name])
+  @@unique([seasonId, location, name])
 }
 
 // ============================================================
@@ -179,11 +250,14 @@ model Sector {
 // ============================================================
 
 model SowingPlan {
-  id       String  @id @default(uuid())
+  id       String @id @default(uuid())
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   planType String // 'SSM' | 'LPM'
-  name     String  @unique
-  location String?
-  status   String  @default("DRAFT") // 'DRAFT' | 'IN_PROGRESS' | 'COMPLETED'
+  name     String
+  /// '' when the plan has no location (SSM plans / imported plans)
+  location String @default("")
+  status   String @default("DRAFT") // 'DRAFT' | 'IN_PROGRESS' | 'COMPLETED'
 
   entries    SowingPlanEntry[]
   ssmSowings SowingSSM[]
@@ -191,6 +265,9 @@ model SowingPlan {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // A plan name may be reused across locations (e.g. "Sector 1" in Said 1 and Said 2).
+  @@unique([seasonId, location, name])
 }
 
 model SowingPlanEntry {
@@ -212,13 +289,15 @@ model SowingPlanEntry {
   plannedQuantity Int?
   sectorId        String?
   sector          Sector? @relation(fields: [sectorId], references: [id])
-  lines           String?
+  lines           Int?
   metersPerLine   Float?
   seedsPerMeter   Int?
 
   // --- Execution progress ---
   executedTrays    Int? @default(0)
   executedQuantity Int? @default(0)
+
+  remark String?
 
   // --- Link to executed sowings (1:N — multiple executions per entry) ---
   ssmSowings SowingSSM[]
@@ -237,12 +316,15 @@ model SowingPlanEntry {
 
 model SowingSSM {
   id          String           @id @default(uuid())
+  seasonId    String
+  season      Season           @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   planId      String
   plan        SowingPlan       @relation(fields: [planId], references: [id])
   planEntryId String?
   planEntry   SowingPlanEntry? @relation(fields: [planEntryId], references: [id])
 
   variety     String
+  code        Int // batch code (SSM) — variety stays plain; display as "variety <code>"
   sowingDate  DateTime
   lotNumber   String
   stockType   String // 'BIO' | 'CVT'
@@ -251,6 +333,8 @@ model SowingSSM {
   numberOfTrays Int
   seedsPerTray  Int @default(285)
   quantityUsed  Int // numberOfTrays × seedsPerTray
+
+  remark String?
 
   tunnelId     String?
   tunnelNumber String? // denormalized: "T1", "T2" — for UI display
@@ -267,6 +351,7 @@ model SowingSSM {
 
   @@index([tunnelId])
   @@index([planId])
+  @@index([seasonId])
 }
 
 // ============================================================
@@ -275,6 +360,8 @@ model SowingSSM {
 
 model SowingLPM {
   id          String           @id @default(uuid())
+  seasonId    String
+  season      Season           @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   planId      String
   plan        SowingPlan       @relation(fields: [planId], references: [id])
   planEntryId String?
@@ -291,8 +378,8 @@ model SowingLPM {
   sectorId String?
   sector   Sector? @relation(fields: [sectorId], references: [id])
 
-  lines         String?
-  metersPerLine Float?
+  lines         Int?
+  meterPerLine  Int?
   seedsPerMeter Int?
 
   remarks String?
@@ -304,6 +391,7 @@ model SowingLPM {
 
   @@index([sectorId])
   @@index([planId])
+  @@index([seasonId])
 }
 
 // ============================================================
@@ -318,6 +406,7 @@ model PlantStock {
   lpmSowing   SowingLPM? @relation(fields: [lpmSowingId], references: [id], onDelete: Cascade)
 
   variety   String
+  code      Int? // batch code (mirrors SowingSSM.code for SSM batches)
   location  String // tunnel number for SSM, sector name for LPM
   lotNumber String
   stockType String // 'CVT' | 'BIO'
@@ -326,8 +415,8 @@ model PlantStock {
   numberOfTrays Int?
   seedsPerTray  Int?
   // LPM
-  lines         String?
-  metersPerLine Float?
+  lines         Int?
+  meterPerLine  Int?
   seedsPerMeter Int?
 
   expectedPlants Int
@@ -336,7 +425,8 @@ model PlantStock {
 
   currentStage String @default("SEEDLING")
 
-  counts PlantCount[]
+  counts         PlantCount[]
+  harvestRecords HarvestRecord[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -354,11 +444,33 @@ model PlantCount {
   plantStockId String
   plantStock   PlantStock @relation(fields: [plantStockId], references: [id], onDelete: Cascade)
 
-  countType       String // 'TRAY' | 'METER'
-  sampleSize      Float // trays or meters sampled
-  countedPlants   Int // plants counted in the sample
-  density         Float // plants per tray / per meter (computed)
-  estimatedPlants Int // extrapolated to the whole batch (computed)
+  countType String // 'TRAY' (SSM) | 'ROW_METRE' (LPM)
+
+  // Where the sample was taken.
+  // SSM: the tunnel being counted (a batch can be split over several tunnels).
+  // LPM: the sector name.
+  location String?
+
+  // LPM only — which line of the sowing was sampled (1..SowingLPM.lines).
+  line          Int?
+  // LPM only — how many of the ROWS_PER_LINE rows were covered (1..7).
+  // The operator must take at least one sample per row, so
+  // sampleSize >= rowsInspected.
+  rowsInspected Int?
+
+  // trays (SSM) or row-metres (LPM). LPM samples are always 1 metre of one
+  // row, so this is also the number of samples taken.
+  sampleSize Float
+
+  // Plants actually present in the sample. When the operator counts the GAPS
+  // instead, this is derived as (expectedInSample - missingPlants).
+  countedPlants Int
+  // Gaps as entered by the operator, kept for transparency. Null when the
+  // operator counted plants directly.
+  missingPlants Int?
+
+  density         Float // plants per tray / per row-metre (computed)
+  estimatedPlants Int // extrapolated to the batch or to the line (computed)
   germinationRate Float? // estimatedPlants / seedsSown * 100 (computed)
 
   countDate DateTime @default(now())
@@ -390,4 +502,419 @@ model SowingTunnelAssignment {
   @@unique([ssmSowingId, tunnelId])
   @@index([ssmSowingId])
   @@index([tunnelId])
+}
+
+// ============================================================
+// PHYTOSANITARY — Crop protection product catalog & program
+// ============================================================
+
+/// The catalogue of crop-protection products AND fertilisers.
+///
+/// GLOBAL on purpose: a product is typed once and never re-typed per season. The
+/// per-season part — whether it is allowed this season, and how much is left —
+/// lives on `AgriInputSeason`, one row per product per season. A quantity
+/// here would be ambiguous, because it could belong to any season at all.
+///
+/// (The model keeps its old name — P6-10's cheaper option — so no URL, service
+/// or client had to be renamed. `category` is what says it is a fertiliser.)
+model PhytosanitaryProduct {
+  id               String  @id @default(uuid())
+  name             String  @unique
+  activeIngredient String?
+  category         String? // 'FUNGICIDE' | 'INSECTICIDE' | 'HERBICIDE' | 'FERTILISER' | ...
+  unit             String? // e.g. 'L', 'KG', 'g'
+  notes            String?
+
+  /// ⚠️ SUPERSEDED by `AgriInputSeason.currentQuantity` (P6). Kept for now so no
+  /// existing screen or client breaks; it is no longer the source of truth for
+  /// stock, and it is removed in P6-01 as soon as the new screens read the
+  /// season row instead.
+  currentQuantity Float @default(0)
+
+  /// The seasons that use this product — one row per season it is allowed in.
+  seasonRows AgriInputSeason[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// One row per product per season.
+///
+/// This single table answers the two questions that always go together:
+///   - **Is this product allowed this season?** No row means no — so a product
+///     banned in 26-27 simply cannot be picked in a plan or a treatment.
+///   - **How much is left?** The stock lives here, not on the catalogue, so it
+///     is never ambiguous which season a balance belongs to.
+model AgriInputSeason {
+  id        String               @id @default(uuid())
+  seasonId  String
+  season    Season               @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  productId String
+  product   PhytosanitaryProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  currentQuantity Float @default(0)
+
+  /// What this season's row is used BY (P6-03).
+  ///
+  /// These three used to point at the catalogue product. They point here now, so
+  /// a treatment can only ever touch its own season's stock — and so that "this
+  /// row exists" and "this product was allowed that season" are the same
+  /// statement. Prisma needs the opposite end of a relation to exist,
+  /// which is why this list is not decoration.
+  programEntries PhytosanitaryProgramEntry[]
+  planEntries    CropCarePlanEntry[]
+  operations     CropOperation[]
+
+  movements AgriInputMovement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, productId])
+  @@index([seasonId])
+}
+
+/// The ledger behind that stock — same shape, and the same sign convention, as
+/// `StockMovement` for seeds and peat: positive is in, negative is out.
+model AgriInputMovement {
+  id            String          @id @default(uuid())
+  inputSeasonId String
+  inputSeason   AgriInputSeason @relation(fields: [inputSeasonId], references: [id], onDelete: Cascade)
+
+  quantity Float // positive = in, negative = out
+  reason   String // see MovementReason in src/common/enums
+
+  /// e.g. 'operation' + the operation id when a treatment consumed the stock.
+  referenceType String?
+  referenceId   String?
+  note          String?
+
+  /// The user's NAME (not their id) — same rule as the other two ledgers:
+  /// readable where it is shown, and never null.
+  createdByName String
+  createdAt     DateTime @default(now())
+
+  @@index([inputSeasonId])
+  @@index([referenceType, referenceId])
+}
+
+/// A predefined program: the list of products that SHOULD be used during the
+/// growing period before harvest.
+///
+/// **One active program PER SEASON** (P6-14, decided 2026-09-29) — not one in the
+/// whole app. `createProgram` switches off the previous program of the *same*
+/// season only, and the read asks for the open season's. A new season therefore
+/// starts with no program instead of silently inheriting the last one's, which
+/// matters because a country's restrictions change between seasons.
+///
+/// (This is a comment-only change — no migration was needed to make it true, the
+/// `seasonId` column was already there.)
+model PhytosanitaryProgram {
+  id       String  @id @default(uuid())
+  seasonId String
+  season   Season  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  name     String
+  active   Boolean @default(true)
+  notes    String?
+
+  entries PhytosanitaryProgramEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, name])
+}
+
+model PhytosanitaryProgramEntry {
+  id            String               @id @default(uuid())
+  programId     String
+  program       PhytosanitaryProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  /// That season's row for the product (P6-03) — not the catalogue entry.
+  inputSeasonId String
+  inputSeason   AgriInputSeason      @relation(fields: [inputSeasonId], references: [id], onDelete: Cascade)
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([programId, inputSeasonId])
+  @@index([programId])
+}
+
+// ============================================================
+// CROP CARE — Irrigation & Treatment (plans + operations)
+// ============================================================
+
+/// A scheduled plan for irrigation or treatment
+model CropCarePlan {
+  id       String @id @default(uuid())
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  planType String // 'IRRIGATION' | 'TREATMENT'
+  name     String
+  status   String @default("DRAFT") // 'DRAFT' | 'ACTIVE' | 'COMPLETED'
+
+  locations CropCarePlanLocation[]
+  entries   CropCarePlanEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, name])
+}
+
+/// Many-to-many: a plan's default scope (which tunnels/sectors it covers)
+model CropCarePlanLocation {
+  id String @id @default(uuid())
+
+  planId     String
+  plan       CropCarePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  targetType String // 'TUNNEL' | 'SECTOR'
+  tunnelId   String?
+  tunnel     Tunnel?      @relation(fields: [tunnelId], references: [id], onDelete: Cascade)
+  sectorId   String?
+  sector     Sector?      @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+}
+
+/// A scheduled care instance on a date (PLANNED until executed)
+model CropCarePlanEntry {
+  id     String       @id @default(uuid())
+  planId String
+  plan   CropCarePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  plannedDate   DateTime
+  /// That season's row for the product (P6-03). Optional: an irrigation entry
+  /// carries no product at all.
+  inputSeasonId String?
+  inputSeason   AgriInputSeason? @relation(fields: [inputSeasonId], references: [id], onDelete: SetNull)
+  quantity      Float?
+  notes         String?
+
+  status     String    @default("PLANNED") // 'PLANNED' | 'EXECUTED'
+  executedAt DateTime?
+  executedBy String? // user id
+
+  operation CropOperation? // reverse of CropOperation.planEntry
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([planId])
+  @@index([status])
+}
+
+/// A logged irrigation/treatment operation — from a plan OR standalone.
+/// May target one or more tunnels/sectors.
+model CropOperation {
+  id            String           @id @default(uuid())
+  seasonId      String
+  season        Season           @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  operationType String // 'IRRIGATION' | 'TREATMENT'
+  /// That season's row for the product (P6-03). Optional: irrigation has none.
+  inputSeasonId String?
+  inputSeason   AgriInputSeason? @relation(fields: [inputSeasonId], references: [id], onDelete: SetNull)
+
+  source      String // 'MANUAL' | 'PLAN'
+  planEntryId String?            @unique
+  planEntry   CropCarePlanEntry? @relation(fields: [planEntryId], references: [id], onDelete: SetNull)
+
+  quantity    Float?
+  performedAt DateTime
+  notes       String?
+  createdBy   String? // user id
+
+  locations CropOperationLocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([seasonId])
+  @@index([operationType])
+  @@index([performedAt])
+  @@index([inputSeasonId])
+}
+
+/// Many-to-many: which tunnels/sectors an operation applied to
+model CropOperationLocation {
+  id          String        @id @default(uuid())
+  operationId String
+  operation   CropOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  targetType  String // 'TUNNEL' | 'SECTOR'
+  tunnelId    String?
+  tunnel      Tunnel?       @relation(fields: [tunnelId], references: [id], onDelete: Cascade)
+  sectorId    String?
+  sector      Sector?       @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@index([tunnelId])
+  @@index([sectorId])
+}
+
+// ============================================================
+// HARVEST — Finished-goods production
+// ============================================================
+
+/// A logged harvest (one location: a tunnel or a sector)
+model HarvestRecord {
+  id          String  @id @default(uuid())
+  seasonId    String
+  season      Season  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  productName String
+  targetType  String // 'TUNNEL' | 'SECTOR'
+  tunnelId    String?
+  tunnel      Tunnel? @relation(fields: [tunnelId], references: [id], onDelete: Cascade)
+  sectorId    String?
+  sector      Sector? @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  /// 'CVT' | 'BIO' — SSM (tunnels) only; null for LPM (manual entry)
+  stockType    String?
+  /// Plant code printed on the box label. SSM: the batch code. LPM: box size in
+  /// hundreds + sector. Stored as a snapshot so history survives the batch
+  /// being deleted, and so the finished-goods stock can be reversed correctly.
+  planteCode   String
+  boxCount     Int
+  plantsPerBox Int
+  /// computed = boxCount × plantsPerBox
+  totalPlants  Int
+
+  harvestedAt  DateTime
+  plantStockId String?
+  plantStock   PlantStock? @relation(fields: [plantStockId], references: [id], onDelete: SetNull)
+  createdBy    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([targetType])
+  @@index([tunnelId])
+  @@index([sectorId])
+  @@index([harvestedAt])
+  /// Used by harvested-vs-remaining, which groups harvests by batch
+  @@index([plantStockId])
+  @@index([seasonId])
+}
+
+/// Finished-goods stock (harvested produce) — what Shipment draws from
+model HarvestedProduct {
+  id              String @id @default(uuid())
+  seasonId        String
+  season          Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  name            String
+  /// Plant code from the box label. Two batches of the same variety are told
+  /// apart by this — "Krypton 12" vs "Krypton 13".
+  planteCode      String
+  /// Plants per box. Part of the product's IDENTITY, not an attribute: the same
+  /// variety and code packed at 410 and at 430 are physically different boxes
+  /// and must not share a stock pool, or a shipment could not know how many
+  /// plants a box holds. A shipment reads this instead of asking for it.
+  plantsPerBox    Int
+  unit            String @default("PLANT")
+  currentQuantity Float  @default(0)
+
+  movements HarvestStockMovement[]
+
+  shipmentLines ShipmentLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Never null, so this composite key is safe (a nullable column would let
+  /// duplicates in — PostgreSQL treats NULLs as distinct in a unique index).
+  @@unique([seasonId, name, planteCode, plantsPerBox])
+}
+
+/// Audit: positive = in (harvest), negative = out (shipment)
+model HarvestStockMovement {
+  id                 String           @id @default(uuid())
+  harvestedProductId String
+  harvestedProduct   HarvestedProduct @relation(fields: [harvestedProductId], references: [id], onDelete: Cascade)
+
+  quantity      Float // positive = in, negative = out
+  referenceType String // 'harvest' | 'shipment' | 'writeoff'
+  referenceId   String?
+
+  /// Why a write-off happened. Null for harvest and shipment movements.
+  reason String? // 'opening' | 'returned_to_client' | 'waste' | 'correction'
+  note   String?
+
+  /// Who caused this movement — the user's NAME, for the same reason as on
+  /// `StockMovement`: readable on the screen, and never null.
+  createdByName String
+
+  createdAt DateTime @default(now())
+
+  @@index([harvestedProductId])
+  @@index([referenceType, referenceId])
+}
+
+// ============================================================
+// SHIPMENTS — finished goods leaving the farm
+// Header + lines, mirroring Delivery / DeliveryLot.
+// ============================================================
+
+model Shipment {
+  id             String   @id @default(uuid())
+  seasonId       String
+  season         Season   @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  /// Unique — a duplicate almost always means a double entry.
+  shipmentNumber String
+  shipmentDate   DateTime
+  truckId        String
+  truck          Truck    @relation(fields: [truckId], references: [id])
+  createdBy      String?
+
+  lines ShipmentLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, shipmentNumber])
+  @@index([shipmentDate])
+  @@index([truckId])
+}
+
+/// A truck that carries shipments. The name is unique so a typo cannot create a
+/// second "Truck 1", and one truck can carry many shipments.
+model Truck {
+  id                 String  @id @default(uuid())
+  seasonId           String
+  season             Season  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  name               String
+  /// Trailer plate — always known, so required.
+  trailerPlateNumber String
+  /// Tractor unit plate — can change, so optional.
+  truckPlateNumber   String?
+
+  /// Deleting a truck still holding shipments is refused (Restrict), not
+  /// cascaded, so shipments can never silently disappear.
+  shipments Shipment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([seasonId, name])
+}
+
+model ShipmentLine {
+  id                 String           @id @default(uuid())
+  shipmentId         String
+  shipment           Shipment         @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  harvestedProductId String
+  harvestedProduct   HarvestedProduct @relation(fields: [harvestedProductId], references: [id], onDelete: Cascade)
+
+  boxCount     Int
+  /// Snapshot of the product's box size at the time of shipping, so history
+  /// survives the product being repacked later.
+  plantsPerBox Int
+  /// computed = boxCount × plantsPerBox
+  totalPlants  Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shipmentId])
+  @@index([harvestedProductId])
 }

@@ -5,6 +5,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { Request } from 'express';
 import { TokenPayload } from '../token-payload';
 import { AuthService } from '../auth.service';
+import { ERROR_MESSAGES } from '../../common/error-messages';
 
 @Injectable()
 export class JwtRefreshStrategy extends PassportStrategy(
@@ -35,7 +36,9 @@ export class JwtRefreshStrategy extends PassportStrategy(
 
   async validate(request: Request, payload: TokenPayload) {
     const token = JwtRefreshStrategy.refreshTokenExtractor(request);
-    if (!token) throw new UnauthorizedException('Refresh token not found');
+    if (!token) {
+      throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
+    }
 
     return this.authService.verifyRefreshToken(token, payload.jti);
   }

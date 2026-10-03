@@ -11,8 +11,10 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { StockType } from '../../deliveries/enums/stock-type.enum';
+import { NormalizeName } from '../../common/normalize-name';
 
 export class CreatePlanEntryDto {
+  @NormalizeName()
   @IsString()
   @IsNotEmpty()
   variety!: string;
@@ -20,6 +22,7 @@ export class CreatePlanEntryDto {
   @IsEnum(StockType)
   stockType!: StockType;
 
+  @NormalizeName()
   @IsOptional()
   @IsString()
   peat?: string;
@@ -47,17 +50,28 @@ export class CreatePlanEntryDto {
   sectorId?: string;
 
   @IsOptional()
-  @IsString()
-  lines?: string;
+  @Type(() => Number)
+  @IsNumber()
+  lines?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   metersPerLine?: number;
 
+  /**
+   * Derived server-side from plannedQuantity, lines and metersPerLine.
+   * Anything sent here is ignored; the field is kept only so clients that still
+   * send it do not fail validation.
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   seedsPerMeter?: number;
+
+  @NormalizeName()
+  @IsOptional()
+  @IsString()
+  remark?: string;
 }
