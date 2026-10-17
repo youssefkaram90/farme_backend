@@ -4,7 +4,6 @@ import {
   Post,
   Body,
   Param,
-  ParseUUIDPipe,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -15,6 +14,7 @@ import { PermissionsGuard } from './guards/permissions.guard';
 import { AdminOnlyGuard } from './guards/admin-only.guard';
 import { RequirePermissions } from './decorators/require-permissions.decorator';
 import { SetUserPermissionsDto } from './dto/set-user-permissions.dto';
+import { RecordIdPipe } from '../common/pipes/record-id.pipe';
 
 /**
  * Class-level guards for the same reason as `UsersController`: the default has to
@@ -40,7 +40,7 @@ export class PermissionsController {
    */
   @Get('users/:userId')
   @RequirePermissions('permissions.view')
-  getUserPermissions(@Param('userId', ParseUUIDPipe) userId: string) {
+  getUserPermissions(@Param('userId', RecordIdPipe) userId: string) {
     return this.permissionsService.getUserPermissions(userId);
   }
 
@@ -55,7 +55,7 @@ export class PermissionsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(AdminOnlyGuard)
   setUserPermissions(
-    @Param('userId', ParseUUIDPipe) userId: string,
+    @Param('userId', RecordIdPipe) userId: string,
     @Body() dto: SetUserPermissionsDto,
   ) {
     return this.permissionsService.setUserPermissions(

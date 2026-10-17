@@ -21,6 +21,7 @@ import {
 import { SeasonService } from '../season/season.service';
 import type { Actor } from '../common/actor';
 import { ERROR_MESSAGES } from '../common/error-messages';
+import { STAGE_SEEDLING } from '../plant-stock/plant-stock.constants';
 
 @Injectable()
 export class SowingLPMService {
@@ -132,18 +133,33 @@ export class SowingLPMService {
       throw new BadRequestException('Please enter the length of the lines.');
     }
 
-    // 4. Validate sector if sectorId is provided
-    let sectorName = '';
-    if (sectorId) {
-      const sector = await this.prismaService.sector.findUnique({
-        where: { id: sectorId },
-      });
-
-      if (!sector) {
-        throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
-      }
-      sectorName = sector.name;
+    // 4. The sector is REQUIRED (PSTOCK-20 (i), decided 2026-10-10).
+    //
+    // A field sowing with no sector used to store an EMPTY location on its plant
+    // stock, and both screens print a blank location as "Not assigned" — the same
+    // bucket as a tunnel batch whose trays have not been transported yet. Two
+    // different kinds of batch then shared one page, and that page could not tell
+    // which kind it was showing (its title, its columns and its count form all
+    // followed whichever row came back first).
+    //
+    // This reverses `make_sector_id_optional_on_sowing_lpm` (2026-08-09). Rows
+    // already saved that way keep their blank location; editing one now asks for
+    // the sector that was missing.
+    if (!sectorId) {
+      throw new BadRequestException(
+        'Choose the sector this field sowing goes into.',
+      );
     }
+
+    const sector = await this.prismaService.sector.findUnique({
+      where: { id: sectorId },
+    });
+
+    if (!sector) {
+      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+    }
+
+    const sectorName = sector.name;
 
     // The sowing date must belong to the season this sowing is filed into
     // (SEASON-08).
@@ -189,6 +205,7 @@ export class SowingLPMService {
       await tx.plantStock.create({
         data: {
           lpmSowingId: sowing.id,
+          sectorId,
           variety,
           location: sectorName,
           lotNumber,
@@ -198,7 +215,7 @@ export class SowingLPMService {
           seedsPerMeter,
           expectedPlants: quantityUsed,
           seedsSown: quantityUsed,
-          currentStage: 'SEEDLING',
+          currentStage: STAGE_SEEDLING,
         },
       });
 
@@ -300,8 +317,9 @@ export class SowingLPMService {
     const existing = await this.findOne(id);
 
     // Every field is optional now (SSM-03), so "not sent" must mean "keep",
-    // never "write undefined". The sector is the one field that can be cleared
-    // deliberately, by sending `null`.
+    // never "write undefined". The sector is the one field that is NOT chained
+    // with `??`: an explicit `null` has to reach the check below, which refuses
+    // it (PSTOCK-20 (i)) instead of being read as "keep".
     const variety = dto.variety ?? existing.variety;
     const lotNumber = dto.lotNumber ?? existing.lotNumber;
     const quantityUsed = dto.quantityUsed ?? existing.quantityUsed;
@@ -312,6 +330,17 @@ export class SowingLPMService {
 
     const sectorChanged = dto.sectorId !== undefined;
     const sectorId = sectorChanged ? dto.sectorId : existing.sectorId;
+
+    // A field sowing can be MOVED to another sector, but not left without one
+    // (PSTOCK-20 (i)). Clearing it used to keep the OLD sector name as the plant
+    // stock's location while the sowing claimed to be in no sector at all — the
+    // two disagreed from then on, and the batch stayed filed under a sector it
+    // had left.
+    if (sectorChanged && !sectorId) {
+      throw new BadRequestException(
+        'A field sowing always belongs to a sector. Pick the sector you want instead of taking it out of one.',
+      );
+    }
 
     if (existing.planEntryId) {
       const planEntry = await this.prismaService.sowingPlanEntry.findUnique({
@@ -396,6 +425,7 @@ export class SowingLPMService {
             location: sectorChanged
               ? (sector?.name ?? existing.plantStock.location)
               : existing.plantStock.location,
+            sectorId: sectorChanged ? sectorId : undefined,
             lotNumber,
             lines,
             meterPerLine,

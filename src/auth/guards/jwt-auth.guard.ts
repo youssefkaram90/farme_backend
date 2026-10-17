@@ -1,8 +1,4 @@
-import {
-  ExecutionContext,
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ERROR_MESSAGES } from '../../common/error-messages';
 
@@ -16,16 +12,16 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
   handleRequest<TUser = unknown>(
     err: unknown,
     user: TUser | false | null | undefined,
-    _info: unknown,
-    _context: ExecutionContext,
-    _status?: unknown,
   ): TUser {
-    if (err || !user) {
-      throw err ?? new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
+    if (err instanceof Error) {
+      throw err;
+    }
+    if (!user) {
+      throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
     }
 
     // Passport hands back whatever the strategy returned; `!user` above is the
     // check, so this is only a cast for the return type.
-    return user as TUser;
+    return user;
   }
 }

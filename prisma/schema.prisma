@@ -17,10 +17,11 @@ model Season {
   startDate DateTime
   endDate   DateTime
 
-  status      String    @default("ACTIVE") // "ACTIVE" | "CLOSED"
-  activatedAt DateTime?
-  closedAt    DateTime?
-  createdBy   String?
+  status        String    @default("ACTIVE") // "ACTIVE" | "CLOSED"
+  activatedAt   DateTime?
+  closedAt      DateTime?
+  createdBy     String?
+  createdByName String?
 
   // ---------- everything this season owns ----------
   deliveries            Delivery[]
@@ -236,6 +237,7 @@ model Sector {
 
   lpmSowings             SowingLPM[]
   sowingPlanEntries      SowingPlanEntry[]
+  plantStocks            PlantStock[]
   cropCarePlanLocations  CropCarePlanLocation[]
   cropOperationLocations CropOperationLocation[]
   harvestRecords         HarvestRecord[]
@@ -330,16 +332,52 @@ model SowingSSM {
   stockType   String // 'BIO' | 'CVT'
   productType String // 'SEEDS' | 'PEAT'
 
+  /// The peat pool this sowing took from — lots and stock type together,
+  /// because that pair IS the pool's identity.
+  ///
+  /// Peat used to be ONE pool (lot number 'PEAT', stock type 'GENERIC'), so a
+  /// sowing had no reason to name it and the fields above could only ever
+  /// describe the seeds lot. Peat is tracked per lot now (decided 2026-10-05),
+  /// which makes these two required: editing or deleting a sowing gives the
+  /// peat back, and there is no way to know WHICH lot to return it to without
+  /// them. Every SSM sowing uses peat, so a row without one is a bug rather
+  /// than a variation.
+  peatLotNumber String
+  peatStockType String
+
   numberOfTrays Int
   seedsPerTray  Int @default(285)
   quantityUsed  Int // numberOfTrays × seedsPerTray
 
-  remark String?
+  /// The peat this sowing took, in big balls — STORED, not recomputed.
+  ///
+  /// It used to be derived from `numberOfTrays / TRAYS_PER_PEAT_BALL` every time it
+  /// was needed, **including when peat is given back** on a correction or a
+  /// deletion. That ties the past to the present constant: change the
+  /// trays-per-ball figure and reversing an old sowing returns a different amount
+  /// than it took, quietly.
+  ///
+  /// Seeds were never exposed this way — `seedsPerTray` and `quantityUsed` have
+  /// always been stored on the row. Peat was the one figure that had to be
+  /// recomputed. Stored, the reversal returns exactly what left the pool, whatever
+  /// the constant becomes (SOW-11, phase 1).
+  ///
+  /// Nullable on purpose: a required column cannot be added to a table that already
+  /// has rows without inventing a default, and a default of 0 would make an
+  /// unbackfilled row give back NO peat — silently. Null means "not backfilled
+  /// yet", and the service then falls back to the constant, which is exactly right
+  /// while 380 is the only figure this app has ever used.
+  peatUsed Float?
 
   tunnelId     String?
   tunnelNumber String? // denormalized: "T1", "T2" — for UI display
   tunnel       Tunnel? @relation(fields: [tunnelId], references: [id])
 
+  /// The note the operator types — `remarks`, plural, like every other sowing.
+  ///
+  /// It used to sit beside a second, singular `remark` column that nothing ever
+  /// read or wrote; two migrations 17 minutes apart had added one after the other.
+  /// Dropped in `20261007112500_drop_dead_ssm_remark_column` (SOW-10).
   remarks String?
 
   plantStock PlantStock?
@@ -352,6 +390,26 @@ model SowingSSM {
   @@index([tunnelId])
   @@index([planId])
   @@index([seasonId])
+}
+
+/// A figure the farm can change without a developer (SOW-11, phase 2).
+///
+/// Only VALUES live here. Everything known about a setting — its label, its help
+/// text, its type and its bounds — lives in code (`settings/settings.constants.ts`),
+/// so the table cannot collect a mistyped key and the wording is reviewed with the
+/// change rather than typed into a form.
+///
+/// An absent row is not an error: it means "use the figure the app shipped with",
+/// which is why there is no default here and no `@updatedAt` fallback to invent.
+model Setting {
+  key   String @id
+  value String
+
+  updatedAt DateTime @updatedAt
+
+  /// Who last changed it — a NAME, like the ledger, because it has to stay
+  /// readable years later without looking a uuid up.
+  updatedBy String?
 }
 
 // ============================================================
@@ -404,6 +462,8 @@ model PlantStock {
   ssmSowing   SowingSSM? @relation(fields: [ssmSowingId], references: [id], onDelete: Cascade)
   lpmSowingId String?    @unique
   lpmSowing   SowingLPM? @relation(fields: [lpmSowingId], references: [id], onDelete: Cascade)
+  sectorId    String?
+  sector      Sector?    @relation(fields: [sectorId], references: [id], onDelete: SetNull)
 
   variety   String
   code      Int? // batch code (mirrors SowingSSM.code for SSM batches)
@@ -432,6 +492,7 @@ model PlantStock {
   updatedAt DateTime @updatedAt
 
   @@index([location])
+  @@index([sectorId])
   @@index([variety])
 }
 
@@ -471,7 +532,22 @@ model PlantCount {
 
   density         Float // plants per tray / per row-metre (computed)
   estimatedPlants Int // extrapolated to the batch or to the line (computed)
-  germinationRate Float? // estimatedPlants / seedsSown * 100 (computed)
+  germinationRate Float? // estimatedPlants / seedsInScope * 100 (computed)
+
+  // The BASIS these figures were calculated on, kept on the count so that adding
+  // readings later (PSTOCK-24) re-does the arithmetic on the same one instead of
+  // on whatever the tunnel holds today.
+  //   SSM: scopeSize = trays in that tunnel,       seedsInScope = trays x seedsPerTray
+  //   LPM: scopeSize = one line's row-metres,      seedsInScope = seedsSown / lines
+  // Null on counts recorded before readings existed (one total, no samples).
+  scopeSize    Int?
+  seedsInScope Float?
+
+  /**
+   * One reading per sample: what was found in ONE tray (SSM) or ONE metre of one
+   * row (LPM). The count's figures are calculated from these.
+   */
+  samples PlantCountSample[]
 
   countDate DateTime @default(now())
   notes     String?
@@ -480,6 +556,29 @@ model PlantCount {
   updatedAt DateTime @updatedAt
 
   @@index([plantStockId])
+}
+
+/// One reading: what the operator found in ONE sample (PSTOCK-24).
+model PlantCountSample {
+  id           String     @id @default(uuid())
+  plantCountId String
+  plantCount   PlantCount @relation(fields: [plantCountId], references: [id], onDelete: Cascade)
+
+  // LPM only — the line it came from (1..SowingLPM.lines). Null for trays, which
+  // belong to no line.
+  line Int?
+
+  // What was found. When GAPS were counted, `countedPlants` holds the plants that
+  // follow from the seeds this one sample was expected to hold.
+  countedPlants Int
+  missingPlants Int?
+
+  // The order the operator typed them in, so a count reads back as it was entered.
+  position Int
+
+  createdAt DateTime @default(now())
+
+  @@index([plantCountId])
 }
 
 // ============================================================
@@ -525,11 +624,10 @@ model PhytosanitaryProduct {
   unit             String? // e.g. 'L', 'KG', 'g'
   notes            String?
 
-  /// ⚠️ SUPERSEDED by `AgriInputSeason.currentQuantity` (P6). Kept for now so no
-  /// existing screen or client breaks; it is no longer the source of truth for
-  /// stock, and it is removed in P6-01 as soon as the new screens read the
-  /// season row instead.
-  currentQuantity Float @default(0)
+  // CROP-10 (2026-10-12): the old `currentQuantity` column is gone. A quantity
+  // on a global catalogue product could belong to any season, so it stopped
+  // being the truth the moment `AgriInputSeason` existed — and nothing had
+  // written to it since. A season's stock is `AgriInputSeason.currentQuantity`.
 
   /// The seasons that use this product — one row per season it is allowed in.
   seasonRows AgriInputSeason[]

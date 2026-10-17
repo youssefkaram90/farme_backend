@@ -45,19 +45,19 @@ export function assertEntrySowable(
   entry: { status: string },
   planStatus: string,
 ): void {
-  if (entry.status === PlanEntryStatus.EXECUTED) {
+  if (entry.status === PlanEntryStatus.EXECUTED.toString()) {
     throw new BadRequestException(
       'This plan entry has already been fully sown.',
     );
   }
 
-  if (entry.status === PlanEntryStatus.CLOSED) {
+  if (entry.status === PlanEntryStatus.CLOSED.toString()) {
     throw new BadRequestException(
       'This plan entry was closed on purpose. Reopen it before sowing.',
     );
   }
 
-  if (planStatus === PlanStatus.COMPLETED) {
+  if (planStatus === PlanStatus.COMPLETED.toString()) {
     throw new BadRequestException(
       'This plan is marked complete. Reopen it before sowing.',
     );
@@ -127,7 +127,7 @@ export function summarisePlanProgress(
     plannedTotal += planned(total);
     executedTotal += executed(total);
 
-    if (total.status === PlanEntryStatus.CLOSED) {
+    if (total.status === PlanEntryStatus.CLOSED.toString()) {
       closedCount += total.count;
       closedPlanned += planned(total);
       closedExecuted += executed(total);
@@ -173,7 +173,7 @@ export async function syncPlanEntryProgress(
 
   // Manually closed entries are final: a later sowing execute / edit / delete
   // must not flip them back to PARTIALLY_EXECUTED.
-  if (entry.status === PlanEntryStatus.CLOSED) return;
+  if (entry.status === PlanEntryStatus.CLOSED.toString()) return;
 
   const isSSM = entry.plan.planType === 'SSM';
 

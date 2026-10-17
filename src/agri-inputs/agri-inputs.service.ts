@@ -17,10 +17,10 @@ import { AddAgriInputDto, AdjustAgriInputDto } from './dto/agri-inputs.dto';
 /**
  * The catalogue fields a client actually shows for a product.
  *
- * `currentQuantity` is deliberately NOT among them: that column on
- * `PhytosanitaryProduct` is superseded and a season's stock is what
- * `AgriInputSeason.currentQuantity` says. Not sending it is one less number for
- * a screen to pick up by mistake.
+ * A product deliberately carries no quantity: the catalogue is global, so a
+ * number here could belong to any season. A season's stock is
+ * `AgriInputSeason.currentQuantity` — and not sending the wrong shape is one
+ * less number for a screen to pick up by mistake.
  */
 const PRODUCT_SELECT = {
   select: {

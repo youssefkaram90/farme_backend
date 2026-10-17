@@ -7,7 +7,6 @@ import {
   Patch,
   Query,
   UseGuards,
-  ParseUUIDPipe,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -19,6 +18,7 @@ import { AdminOnlyGuard } from '../permissions/guards/admin-only.guard';
 import { RequirePermissions } from '../permissions/decorators/require-permissions.decorator';
 import { PermissionsService } from '../permissions/permissions.service';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
+import { RecordIdPipe } from '../common/pipes/record-id.pipe';
 
 /**
  * Class-level guards, so the safe default is "signed in, and permission-checked
@@ -63,7 +63,7 @@ export class UsersController {
    */
   @Get(':id')
   @RequirePermissions('users.view')
-  async getUser(@Param('id', ParseUUIDPipe) id: string) {
+  async getUser(@Param('id', RecordIdPipe) id: string) {
     const user = await this.usersService.getUserSafe({ id });
     const permissions =
       await this.permissionsService.getUserPermissionNames(id);
@@ -80,7 +80,7 @@ export class UsersController {
   @Patch(':id/role')
   @UseGuards(AdminOnlyGuard)
   async updateUserRole(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', RecordIdPipe) id: string,
     @Body() dto: UpdateUserRoleDto,
   ) {
     return this.usersService.updateUserRole(id, dto.role);

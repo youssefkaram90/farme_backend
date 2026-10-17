@@ -125,14 +125,14 @@ describe('the same trailer twice (TRUCK-02)', () => {
       service.create({
         name: 'Truck 4',
         trailerPlateNumber: 'AB-12-CD',
-      } as never),
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     await expect(
       service.create({
         name: 'Truck 4',
         trailerPlateNumber: 'AB-12-CD',
-      } as never),
+      }),
     ).rejects.toThrow('Trailer AB-12-CD is already on Truck 3.');
   });
 
@@ -144,7 +144,7 @@ describe('the same trailer twice (TRUCK-02)', () => {
       service.create({
         name: 'Truck 4',
         trailerPlateNumber: normalizePlate('  ab-12-cd '),
-      } as never),
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(db.trucks).toHaveLength(2);
@@ -156,7 +156,7 @@ describe('the same trailer twice (TRUCK-02)', () => {
     await service.create({
       name: 'Truck 4',
       trailerPlateNumber: normalizePlate('cd-34-ef'),
-    } as never);
+    });
 
     expect(db.trucks).toHaveLength(3);
   });
@@ -165,7 +165,7 @@ describe('the same trailer twice (TRUCK-02)', () => {
     const { service } = setup();
 
     await expect(
-      service.update('truck-1', { trailerPlateNumber: 'AB-12-CD' } as never),
+      service.update('truck-1', { trailerPlateNumber: 'AB-12-CD' }),
     ).resolves.toMatchObject({ id: 'truck-1' });
   });
 });
@@ -184,7 +184,7 @@ describe('which season a truck belongs to (TRUCK-01)', () => {
     const { service, db } = setup();
 
     await expect(
-      service.update('truck-old', { name: 'Last year' } as never),
+      service.update('truck-old', { name: 'Last year' }),
     ).rejects.toBeInstanceOf(NotFoundException);
 
     await expect(service.remove('truck-old')).rejects.toBeInstanceOf(

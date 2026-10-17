@@ -8,6 +8,7 @@ import { Observable, type Subscription } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserRole } from '../users/enums/userRole.enum';
 import { seasonViewStore } from './season-view.store';
+import type { Request } from 'express';
 
 /**
  * Let an administrator look at another season — the switcher.
@@ -33,6 +34,13 @@ import { seasonViewStore } from './season-view.store';
  * `run()`, which is what carries the context through the controller and every
  * `await` after it.
  */
+
+interface SeasonViewRequest extends Request {
+  user?: {
+    role?: UserRole;
+  };
+}
+
 @Injectable()
 export class SeasonViewInterceptor implements NestInterceptor {
   constructor(private readonly prismaService: PrismaService) {}
@@ -45,7 +53,7 @@ export class SeasonViewInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const request = context.switchToHttp().getRequest();
+    const request = context.switchToHttp().getRequest<SeasonViewRequest>();
     const method = String(request?.method ?? '').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') {
       return next.handle();
@@ -55,7 +63,7 @@ export class SeasonViewInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const requested = request?.cookies?.season;
+    const requested: unknown = request?.cookies?.season;
     if (typeof requested !== 'string' || requested.length === 0) {
       return next.handle();
     }

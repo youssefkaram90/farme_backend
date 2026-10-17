@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -7,15 +8,27 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PlantStockService } from '../plant-stock/plant-stock.service';
 import { Prisma } from '../generated/prisma/client';
 import { SeasonService } from './season.service';
+import { formatQuantity } from '../common/format-quantity';
 import {
   formatSeasonDate,
   nextSeasonCode,
   seasonBounds,
   startYearFromCode,
 } from '../common/season-code';
+import type { Actor } from '../common/actor';
 
 /** Either the plain client or a transaction client — the checks accept both. */
 type Db = PrismaService | Prisma.TransactionClient;
+
+/**
+ * Sent by the close action to mean "the following season". A season id can
+ * never be this, because ids are UUIDs.
+ */
+const OPEN_NEXT = 'next';
+
+/** Every season id is a UUID, so anything else names no row. */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** One finding in the close report. */
 export type CloseFinding = {
@@ -27,6 +40,11 @@ export type CloseFinding = {
 
 export type ClosePreview = {
   season: { id: string; code: string };
+  /**
+   * The season that follows this one. `id` is null while it does not exist yet
+   * — closing creates it, so it is always safe to offer as a choice.
+   */
+  nextSeason: { id: string | null; code: string };
   /** While this is non-empty the close is refused. */
   blocks: CloseFinding[];
   /** Shown for acknowledgement; the close may still go ahead. */
@@ -34,6 +52,13 @@ export type ClosePreview = {
   /** Read-only context, e.g. the closing stock balances. */
   info: CloseFinding[];
   canClose: boolean;
+};
+
+/** What a close answers with — the season closed, and the one it opened. */
+export type CloseResult = {
+  closed: { id: string; code: string };
+  /** `null` when the administrator chose to open no season. */
+  opened: { id: string; code: string } | null;
 };
 
 @Injectable()
@@ -65,16 +90,18 @@ export class SeasonCloseService {
       );
     }
 
-    const [blocks, warningGroups, info, incompleteShipments] =
+    const [blocks, warningGroups, info, incompleteShipments, nextSeason] =
       await Promise.all([
         this.findLeftoverGoods(season.id),
         this.findStandingThings(season.id),
         this.findClosingStockBalances(season.id),
         this.findIncompleteShipments(season.id),
+        this.findNextSeason(season.code),
       ]);
 
     return {
       season: { id: season.id, code: season.code },
+      nextSeason,
       blocks,
       // The unfinished-record warning joins the standing-things ones: both are
       // things to look at, neither stops the close (SEASON-02).
@@ -82,6 +109,27 @@ export class SeasonCloseService {
       info,
       canClose: blocks.length === 0,
     };
+  }
+
+  /**
+   * The season that follows the given code, with its id when it already exists.
+   *
+   * A `null` id means the season does not exist yet and closing will create it.
+   * Answering this in the preview is what lets the close wizard offer "open the
+   * next season" before that season exists — without the client having to know
+   * the season-code rule.
+   */
+  private async findNextSeason(
+    code: string,
+  ): Promise<{ id: string | null; code: string }> {
+    const nextCode = nextSeasonCode(code);
+
+    const row = await this.prismaService.season.findUnique({
+      where: { code: nextCode },
+      select: { id: true },
+    });
+
+    return { id: row?.id ?? null, code: nextCode };
   }
 
   /**
@@ -211,7 +259,7 @@ export class SeasonCloseService {
         message: `Seeds: ${seeds.length} lot(s) still have a balance.`,
         details: seeds.map(
           (i) =>
-            `${i.productName} · lot ${i.lotNumber} — ${i.currentQuantity.toLocaleString('en-GB')}`,
+            `${i.productName} · lot ${i.lotNumber} — ${formatQuantity(i.currentQuantity, i.productType)}`,
         ),
       });
     }
@@ -222,7 +270,7 @@ export class SeasonCloseService {
         message: `Peat: ${peat.length} lot(s) still have a balance.`,
         details: peat.map(
           (i) =>
-            `${i.productName} · lot ${i.lotNumber} — ${i.currentQuantity.toFixed(2)}`,
+            `${i.productName} · lot ${i.lotNumber} — ${formatQuantity(i.currentQuantity, i.productType)}`,
         ),
       });
     }
@@ -264,13 +312,44 @@ export class SeasonCloseService {
   }
 
   /**
-   * Close a season and open the next one — one transaction, all or nothing.
+   * Close a season — one transaction, all or nothing.
    *
-   * Copies NOTHING: the new season starts with no tunnels, no sectors, no
-   * stock and no plans. The admin re-enters those in the browser.
+   * Closing no longer forces the following season open: the administrator
+   * chooses which season to open (or none) in the same action, so there is no
+   * assumption that the next season is the one wanted.
+   *
+   * The following season is always created if it does not exist yet — as
+   * CLOSED and ready to open — so "open the next one" is always a choice. It is
+   * opened only when the administrator picks it.
+   *
+   * Copies NOTHING: a season starts with no tunnels, no sectors, no stock and
+   * no plans. The admin re-enters those in the browser.
+   *
+   * When nothing is opened the app has no open season at all, and every new
+   * record is refused until an administrator opens one — that is deliberate.
+   *
+   * @param open `"next"`, the id of a season to open, or `null` to open none.
+   * @param actor who is closing — recorded as the creator of the season this
+   *   close creates when it does not exist yet.
    */
-  async close(seasonId: string) {
-    const opened = await this.prismaService.$transaction(async (tx) => {
+  async close(
+    seasonId: string,
+    open: string | null,
+    actor: Actor,
+  ): Promise<CloseResult> {
+    const target = open === '' ? null : open;
+
+    if (target && target !== OPEN_NEXT && !UUID_PATTERN.test(target)) {
+      throw new BadRequestException('Choose a season to open, or none.');
+    }
+
+    if (target === seasonId) {
+      throw new BadRequestException(
+        'That is the season being closed. Choose a different one, or none.',
+      );
+    }
+
+    const result = await this.prismaService.$transaction(async (tx) => {
       const season = await tx.season.findUnique({
         where: { id: seasonId },
         select: { id: true, code: true, status: true },
@@ -302,38 +381,60 @@ export class SeasonCloseService {
         );
       }
 
-      const nextCode = nextSeasonCode(season.code);
+      const closed = await tx.season.update({
+        where: { id: season.id },
+        data: { status: 'CLOSED', closedAt: new Date() },
+        select: { id: true, code: true },
+      });
 
-      const alreadyExists = await tx.season.findUnique({
+      // The following season always exists after a close, ready to open — but
+      // it is opened only when the administrator chooses it.
+      const nextCode = nextSeasonCode(season.code);
+      await tx.season.upsert({
         where: { code: nextCode },
+        update: {},
+        create: {
+          code: nextCode,
+          ...seasonBounds(startYearFromCode(nextCode)),
+          status: 'CLOSED',
+          createdBy: actor.id,
+          createdByName: actor.name,
+        },
         select: { id: true },
       });
 
-      if (alreadyExists) {
-        throw new ConflictException(
-          `Season ${nextCode} already exists, so ${season.code} cannot be closed into it. Please check the seasons.`,
-        );
+      let opened: { id: string; code: string } | null = null;
+
+      if (target) {
+        const seasonToOpen =
+          target === OPEN_NEXT
+            ? await tx.season.findUnique({
+                where: { code: nextCode },
+                select: { id: true, code: true },
+              })
+            : await tx.season.findUnique({
+                where: { id: target },
+                select: { id: true, code: true },
+              });
+
+        if (!seasonToOpen) {
+          throw new NotFoundException('That season no longer exists.');
+        }
+
+        opened = await tx.season.update({
+          where: { id: seasonToOpen.id },
+          data: { status: 'ACTIVE', activatedAt: new Date(), closedAt: null },
+          select: { id: true, code: true },
+        });
       }
 
-      await tx.season.update({
-        where: { id: season.id },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
-
-      return tx.season.create({
-        data: {
-          code: nextCode,
-          ...seasonBounds(startYearFromCode(nextCode)),
-          status: 'ACTIVE',
-          activatedAt: new Date(),
-        },
-      });
+      return { closed, opened };
     });
 
     // The open season is held in memory, so the swap that just happened in the
     // database must be picked up before the next request reads it.
     await this.seasonService.refreshActive();
 
-    return opened;
+    return result;
   }
 }

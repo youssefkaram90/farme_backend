@@ -4,6 +4,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '../generated/prisma/client';
 import {
   CreateTunnelAssignmentsDto,
   UpdateTunnelAssignmentDto,
@@ -11,6 +12,7 @@ import {
 import { SeasonService } from '../season/season.service';
 import { getPaginationParams } from '../common/pagination';
 import { ERROR_MESSAGES } from '../common/error-messages';
+import { UNASSIGNED_LOCATION } from '../common/sowing.constants';
 
 @Injectable()
 export class TrayTransportService {
@@ -40,7 +42,7 @@ export class TrayTransportService {
    *   batches went to is per-sowing data and is already on the sowing and on these
    *   assignments.
    */
-  async assign(dto: CreateTunnelAssignmentsDto, isAdmin: boolean) {
+  async assign(dto: CreateTunnelAssignmentsDto) {
     const { assignments, transportDate } = dto;
     const date = transportDate ? new Date(transportDate) : new Date();
 
@@ -51,7 +53,9 @@ export class TrayTransportService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const results: any[] = [];
+      const results: Awaited<
+        ReturnType<typeof tx.sowingTunnelAssignment.create>
+      >[] = [];
 
       for (const a of assignments) {
         const sowing = await tx.sowingSSM.findUnique({
@@ -63,7 +67,7 @@ export class TrayTransportService {
           throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
         }
 
-        await this.seasonService.assertWritable(sowing.seasonId, isAdmin);
+        await this.seasonService.assertWritable(sowing.seasonId);
 
         const tunnel = await tx.tunnel.findUnique({
           where: { id: a.tunnelId },
@@ -113,7 +117,9 @@ export class TrayTransportService {
           (ta) => ta.tunnelId === a.tunnelId,
         );
 
-        let result;
+        let result: Awaited<
+          ReturnType<typeof tx.sowingTunnelAssignment.create>
+        >;
         if (existing) {
           result = await tx.sowingTunnelAssignment.update({
             where: { id: existing.id },
@@ -153,7 +159,7 @@ export class TrayTransportService {
           });
 
           // Update PlantStock location if it still has the default
-          if (sowing.plantStock?.location === 'Not assigned') {
+          if (sowing.plantStock?.location === UNASSIGNED_LOCATION) {
             await tx.plantStock.update({
               where: { id: sowing.plantStock.id },
               data: { location: tunnel.number },
@@ -353,6 +359,10 @@ export class TrayTransportService {
    * was not — so this was the one route that could put more trays into a tunnel
    * than it holds (TRAY-04). Both checks run inside one transaction now, and both
    * use the same arithmetic `assign` does.
+   *
+   * The TUNNEL cannot change here (the DTO carries `numberOfTrays` only), so the
+   * plant-stock location needs no recalculation — trays move between tunnels by
+   * removing one transport and creating another (TRAY-06).
    */
   async update(id: string, dto: UpdateTunnelAssignmentDto) {
     return this.prisma.$transaction(async (tx) => {
@@ -412,19 +422,82 @@ export class TrayTransportService {
   }
 
   async remove(id: string) {
-    const existing = await this.prisma.sowingTunnelAssignment.findUnique({
-      where: { id },
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.sowingTunnelAssignment.findUnique({
+        where: { id },
+      });
+
+      if (!existing) {
+        throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+      }
+
+      // No plan-location recalculation any more: the plan's location is the one
+      // the user typed, and removing an assignment was never supposed to rewrite
+      // it (TRAY-01). The PLANT STOCK's location is a different field, and that
+      // one does have to follow the trays (TRAY-06).
+      await tx.sowingTunnelAssignment.delete({ where: { id } });
+
+      await this.resyncTunnelPointers(
+        tx,
+        existing.ssmSowingId,
+        existing.tunnelId,
+      );
+
+      return { message: 'Assignment removed' };
+    });
+  }
+
+  /**
+   * Put a batch's tunnel back in step with its transports (TRAY-06 / TRAY-07).
+   *
+   * TWO fields claim to know where a batch is, and neither was corrected when trays
+   * LEFT a tunnel:
+   *
+   * - `PlantStock.location` — the copy the plant-stock list falls back to for a batch
+   *   with no transport rows ("not transported yet → planned location"). Left alone,
+   *   the variety stayed filed under a tunnel it had left (TRAY-06).
+   * - `SowingSSM.tunnelId` / `tunnelNumber` — set by `assign` ("first assignment
+   *   wins"). Left alone, this is why an emptied tunnel could NEVER be corrected: the
+   *   edit rule counts the sowings pointing at a tunnel, so one sowing left behind
+   *   kept the tunnel permanently "in use" (TRAY-07).
+   *
+   * The rule for both: the MOST RECENT surviving transport wins — that is where the
+   * batch is now — and nothing surviving means it is not in a tunnel at all.
+   *
+   * `emptiedTunnelId` is the tunnel the removed transport was in. The SOWING's own
+   * tunnel is touched ONLY when it points at that tunnel: a tunnel the operator chose
+   * on the sowing form, or one the trays left earlier, must not be clobbered by an
+   * unrelated removal. The plant stock's copy is always recomputed, because it is a
+   * description of where the batch is rather than a decision.
+   */
+  private async resyncTunnelPointers(
+    tx: Prisma.TransactionClient,
+    ssmSowingId: string,
+    emptiedTunnelId: string,
+  ): Promise<void> {
+    const latest = await tx.sowingTunnelAssignment.findFirst({
+      where: { ssmSowingId },
+      orderBy: { transportDate: 'desc' },
+      include: { tunnel: true },
     });
 
-    if (!existing) {
-      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+    await tx.plantStock.updateMany({
+      where: { ssmSowingId },
+      data: { location: latest?.tunnel?.number ?? UNASSIGNED_LOCATION },
+    });
+
+    const sowing = await tx.sowingSSM.findUnique({
+      where: { id: ssmSowingId },
+    });
+
+    if (sowing?.tunnelId === emptiedTunnelId) {
+      await tx.sowingSSM.update({
+        where: { id: ssmSowingId },
+        data: {
+          tunnelId: latest?.tunnelId ?? null,
+          tunnelNumber: latest?.tunnel?.number ?? null,
+        },
+      });
     }
-
-    // No plan-location recalculation any more: the plan's location is the one the
-    // user typed, and removing an assignment was never supposed to rewrite it
-    // (TRAY-01).
-    await this.prisma.sowingTunnelAssignment.delete({ where: { id } });
-
-    return { message: 'Assignment removed' };
   }
 }

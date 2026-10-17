@@ -16,6 +16,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { RequirePermissions } from '../permissions/decorators/require-permissions.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { SeasonIdInBody } from '../season/decorators/season-id-in-body.decorator';
 import type { User } from '../generated/prisma/client';
 
 @Controller('sowing-ssm')
@@ -25,6 +26,7 @@ export class SowingSSMController {
 
   @Post('execute')
   @RequirePermissions('sowing.create')
+  @SeasonIdInBody('planId')
   execute(@Body() dto: ExecuteSSMDto, @CurrentUser() user: User) {
     return this.sowingSSMService.execute(dto, user);
   }

@@ -2,7 +2,6 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { CropCareService } from './crop-care.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SeasonService } from '../season/season.service';
-import type { Actor } from '../common/actor';
 
 /**
  * The crop-care rules that were wrong until 2026-10-02/03, one case each.
@@ -241,7 +240,7 @@ function setup() {
   return { service, db, dated };
 }
 
-const actor = { id: 'user-1', name: 'Krypton' } as Actor;
+const actor = { id: 'user-1', name: 'Krypton' };
 
 const execute = (overrides: Record<string, unknown> = {}) => ({
   performedAt: '2026-10-03',
@@ -310,7 +309,7 @@ describe('deleting', () => {
   });
 
   it('refuses to delete an entry that has an operation (CROP-02)', async () => {
-    const { service, db } = setup();
+    const { service } = setup();
 
     await service.executePlanEntry('entry-done', execute(), actor);
 

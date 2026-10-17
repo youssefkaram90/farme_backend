@@ -154,6 +154,16 @@ export class CreateCropOperationDto {
   locations!: LocationDto[];
 }
 
+/**
+ * Correcting a logged operation (CROP-14).
+ *
+ * The same shape as creating one, on purpose: the edit form sends the WHOLE
+ * corrected operation rather than a patch, so there is never a "was this field
+ * left out, or emptied?" question — and the stock can be corrected from a
+ * complete picture, the old row against the new one.
+ */
+export class UpdateCropOperationDto extends CreateCropOperationDto {}
+
 // -------------------------------------------------------------------
 // Crop care plans
 // -------------------------------------------------------------------

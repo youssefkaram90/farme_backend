@@ -47,14 +47,22 @@ export class DeliveriesController {
     return this.deliveriesService.findOne(id);
   }
 
+  /**
+   * Replace a delivery — the WHOLE delivery, not one changed field.
+   *
+   * The body is the create shape on purpose: the service reverses the old lots'
+   * stock and applies the new ones in one transaction, so a request that named
+   * only part of the delivery would leave the rest undefined and the ledger
+   * guessing (DEL-4). Both clients send the whole form on an edit.
+   */
   @Patch(':id')
   @RequirePermissions('deliveries.edit')
   update(
     @Param('id') id: string,
-    @Body() updateDeliveryDto: CreateDeliveryDto,
+    @Body() dto: CreateDeliveryDto,
     @CurrentUser() user: User,
   ) {
-    return this.deliveriesService.update(id, updateDeliveryDto, user);
+    return this.deliveriesService.update(id, dto, user);
   }
 
   @Delete(':id')

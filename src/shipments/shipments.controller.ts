@@ -17,19 +17,31 @@ import type { User } from '../generated/prisma/client';
 import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { RequirePermissions } from '../permissions/decorators/require-permissions.decorator';
 
+/**
+ * Shipments ride the TRUCK permissions (decided 2026-10-13), the way tray
+ * transport rides `sowing.*` (TRAY-05).
+ *
+ * A shipment is only ever reached through the truck that carried it, so a set of
+ * permissions of its own could not hide anything: whoever could see the truck
+ * saw the loads with it, and nobody was gated on `shipments.view` alone. One
+ * module, one set — see the note in `prisma/seed.ts`.
+ *
+ * The URLs are deliberately unchanged: `/shipments`, flat, as they have always
+ * been.
+ */
 @Controller('shipments')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class ShipmentsController {
   constructor(private readonly shipmentsService: ShipmentsService) {}
 
   @Post()
-  @RequirePermissions('shipments.create')
+  @RequirePermissions('trucks.create')
   create(@Body() dto: CreateShipmentDto, @CurrentUser() user: User) {
     return this.shipmentsService.create(dto, user);
   }
 
   @Patch(':id')
-  @RequirePermissions('shipments.edit')
+  @RequirePermissions('trucks.edit')
   update(
     @Param('id') id: string,
     @Body() dto: CreateShipmentDto,
@@ -39,7 +51,7 @@ export class ShipmentsController {
   }
 
   @Get()
-  @RequirePermissions('shipments.view')
+  @RequirePermissions('trucks.view')
   findAll(
     @Query('q') q?: string,
     @Query('page') page?: string,
@@ -49,13 +61,13 @@ export class ShipmentsController {
   }
 
   @Get(':id')
-  @RequirePermissions('shipments.view')
+  @RequirePermissions('trucks.view')
   findOne(@Param('id') id: string) {
     return this.shipmentsService.findOne(id);
   }
 
   @Delete(':id')
-  @RequirePermissions('shipments.delete')
+  @RequirePermissions('trucks.delete')
   remove(@Param('id') id: string, @CurrentUser() user: User) {
     return this.shipmentsService.remove(id, user);
   }

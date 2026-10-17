@@ -49,6 +49,25 @@ export class ExecuteSSMDto {
   @IsEnum(StockType)
   stockType?: StockType;
 
+  /**
+   * The peat pool this sowing takes from — both halves of its key.
+   *
+   * Peat used to be a single pool, so nobody was asked: the server deducted
+   * from `PEAT`/`GENERIC` whatever the form said. Peat is tracked per lot now
+   * (decided 2026-10-05), so the operator picks the lot, exactly as they already
+   * pick the seeds lot above.
+   *
+   * Required — every SSM sowing uses peat. The stock type is required with it
+   * because a pool is identified by lot number AND stock type, and the row has
+   * to remember which one to give the peat back to.
+   */
+  @IsString()
+  @IsNotEmpty()
+  peatLotNumber!: string;
+
+  @IsEnum(StockType)
+  peatStockType!: StockType;
+
   @Type(() => Number)
   @IsInt()
   @Min(1)

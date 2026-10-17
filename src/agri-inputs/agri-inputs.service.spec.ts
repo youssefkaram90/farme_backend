@@ -6,7 +6,6 @@ import {
 import { AgriInputsService } from './agri-inputs.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SeasonService } from '../season/season.service';
-import type { Actor } from '../common/actor';
 import { MovementReason } from '../common/enums/movement-reason.enum';
 
 /**
@@ -208,14 +207,14 @@ function given(db: FakeAgriInputs, overrides: Partial<Row> = {}) {
   });
 }
 
-const actor = { id: 'user-1', name: 'Krypton' } as Actor;
+const actor = { id: 'user-1', name: 'Krypton' };
 
 describe('putting a product on the season’s list (AGRI-03)', () => {
   it('reads the duplicate check inside the transaction', async () => {
     const { service, db } = setup();
 
     await service.addProduct(
-      { productId: 'prod-1', openingQuantity: 5 } as never,
+      { productId: 'prod-1', openingQuantity: 5 },
       actor,
     );
 
@@ -230,11 +229,11 @@ describe('putting a product on the season’s list (AGRI-03)', () => {
     given(db);
 
     await expect(
-      service.addProduct({ productId: 'prod-1' } as never, actor),
+      service.addProduct({ productId: 'prod-1' }, actor),
     ).rejects.toBeInstanceOf(ConflictException);
 
     await expect(
-      service.addProduct({ productId: 'prod-1' } as never, actor),
+      service.addProduct({ productId: 'prod-1' }, actor),
     ).rejects.toThrow('"Copper" is already in this season\'s list.');
   });
 
@@ -242,7 +241,7 @@ describe('putting a product on the season’s list (AGRI-03)', () => {
     const { service, db } = setup();
 
     await service.addProduct(
-      { productId: 'prod-1', openingQuantity: 40 } as never,
+      { productId: 'prod-1', openingQuantity: 40 },
       actor,
     );
 
@@ -256,7 +255,7 @@ describe('putting a product on the season’s list (AGRI-03)', () => {
   it('writes no movement for an opening balance of zero', async () => {
     const { service, db } = setup();
 
-    await service.addProduct({ productId: 'prod-1' } as never, actor);
+    await service.addProduct({ productId: 'prod-1' }, actor);
 
     expect(db.movements).toHaveLength(0);
   });
@@ -265,10 +264,7 @@ describe('putting a product on the season’s list (AGRI-03)', () => {
     const { service } = setup();
 
     await expect(
-      service.addProduct(
-        { productId: 'prod-1', openingQuantity: -1 } as never,
-        actor,
-      ),
+      service.addProduct({ productId: 'prod-1', openingQuantity: -1 }, actor),
     ).rejects.toThrow('An opening balance cannot be negative.');
   });
 });
@@ -280,7 +276,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
 
     await service.adjustStock(
       'row-1',
-      { quantity: 25, reason: MovementReason.RECEIVED } as never,
+      { quantity: 25, reason: MovementReason.RECEIVED },
       actor,
     );
 
@@ -299,7 +295,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
     await expect(
       service.adjustStock(
         'row-1',
-        { quantity: 0, reason: MovementReason.WASTE } as never,
+        { quantity: 0, reason: MovementReason.WASTE },
         actor,
       ),
     ).rejects.toThrow('Enter a quantity.');
@@ -312,7 +308,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
     await expect(
       service.adjustStock(
         'row-1',
-        { quantity: 5, reason: MovementReason.USED } as never,
+        { quantity: 5, reason: MovementReason.USED },
         actor,
       ),
     ).rejects.toThrow(
@@ -327,7 +323,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
     await expect(
       service.adjustStock(
         'row-1',
-        { quantity: 5, reason: MovementReason.WASTE } as never,
+        { quantity: 5, reason: MovementReason.WASTE },
         actor,
       ),
     ).rejects.toThrow(
@@ -342,7 +338,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
     await expect(
       service.adjustStock(
         'row-1',
-        { quantity: -5, reason: MovementReason.RECEIVED } as never,
+        { quantity: -5, reason: MovementReason.RECEIVED },
         actor,
       ),
     ).rejects.toThrow(
@@ -357,7 +353,7 @@ describe('a movement somebody typed in (AGRI-04)', () => {
     await expect(
       service.adjustStock(
         'row-1',
-        { quantity: -40, reason: MovementReason.WASTE } as never,
+        { quantity: -40, reason: MovementReason.WASTE },
         actor,
       ),
     ).rejects.toBeInstanceOf(BadRequestException);

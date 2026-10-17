@@ -23,6 +23,11 @@ export class ExecuteLPMDto {
 
   @IsOptional()
   @IsUUID()
+  /**
+   * The sector the field sowing goes into. REQUIRED — checked in the service, not
+   * here, so the refusal is a sentence rather than the pipe's generic "invalid
+   * data" (PSTOCK-20 (i), decided 2026-10-10).
+   */
   sectorId?: string;
 
   @NormalizeName()

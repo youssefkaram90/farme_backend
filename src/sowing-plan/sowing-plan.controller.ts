@@ -77,7 +77,7 @@ export class SowingPlanController {
     return this.sowingPlanService.updatePlanStatus(
       id,
       dto.status,
-      user.role === UserRole.ADMIN,
+      user.role === UserRole.ADMIN.toString(),
     );
   }
 

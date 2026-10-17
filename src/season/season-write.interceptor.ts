@@ -4,11 +4,18 @@ import {
   ExecutionContext,
   Injectable,
   NestInterceptor,
+  NotFoundException,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { ERROR_MESSAGES } from '../common/error-messages';
 import { SeasonService } from './season.service';
-import { UserRole } from '../users/enums/userRole.enum';
+
+interface SeasonWriteRequest {
+  method?: string;
+  url?: string;
+  body?: unknown;
+}
 
 /**
  * How to find a record's season.
@@ -148,6 +155,29 @@ const readPlantStockSeason: SeasonReader = async (db, id) => {
   return row?.ssmSowing?.seasonId ?? row?.lpmSowing?.seasonId ?? null;
 };
 
+/**
+ * A plant COUNT has no season either: it belongs to the batch it was taken on,
+ * and the batch belongs to its sowing.
+ */
+const readCountSeason: SeasonReader = async (db, id) => {
+  const row = await db.plantCount.findUnique({
+    where: { id },
+    select: {
+      plantStock: {
+        select: {
+          ssmSowing: { select: { seasonId: true } },
+          lpmSowing: { select: { seasonId: true } },
+        },
+      },
+    },
+  });
+  return (
+    row?.plantStock.ssmSowing?.seasonId ??
+    row?.plantStock.lpmSowing?.seasonId ??
+    null
+  );
+};
+
 /** A tray assignment borrows the season of the sowing it transports. */
 const readAssignmentSeason: SeasonReader = byColumn(async (db, id) => {
   const row = await db.sowingTunnelAssignment.findUnique({
@@ -160,6 +190,14 @@ const readAssignmentSeason: SeasonReader = byColumn(async (db, id) => {
 /** A stock lot carries its season itself. */
 const readStockItemSeason: SeasonReader = byColumn((db, id) =>
   db.stockItem.findUnique({ where: { id }, select: { seasonId: true } }),
+);
+
+/** A boxed, harvested product carries its season itself. */
+const readHarvestedProductSeason: SeasonReader = byColumn((db, id) =>
+  db.harvestedProduct.findUnique({
+    where: { id },
+    select: { seasonId: true },
+  }),
 );
 
 /** `AgriInputSeason` is a product's row PER SEASON, so it carries one too. */
@@ -278,10 +316,17 @@ export const RULES: SeasonWriteRule[] = [
     ),
   ),
   rule('/plant-stock/:id', readPlantStockSeason),
+  // A count is evidence about a season that has been reported on, so deleting one
+  // is judged exactly like filing one (PSTOCK-10).
+  rule('/plant-stock/counts/:countId', readCountSeason),
 
   // --- children: the season lives on the parent -----------------------------
   rule('/sowing-plans/entries/:entryId', readPlanEntrySeason),
   rule('/sowing-plans/entries/:entryId/close', readPlanEntrySeason),
+  // Added after the coverage spec caught it (2026-10-05): the sibling of
+  // /close was judged, this one was not, so a `sowing.edit` holder could have
+  // reopened an entry belonging to a closed season.
+  rule('/sowing-plans/entries/:entryId/reopen', readPlanEntrySeason),
   rule('/crop-care-plans/entries/:entryId', readCropCareEntrySeason),
   rule('/tray-transport/:id', readAssignmentSeason),
 
@@ -290,6 +335,8 @@ export const RULES: SeasonWriteRule[] = [
   rule('/sowing-plans/:planId/entries/bulk', readPlanSeason),
   rule('/crop-care-plans/:id/entries', readCropCarePlanSeason),
   rule('/crop-care-plans/entries/:entryId/execute', readCropCareEntrySeason),
+  // The readings for one batch, saved whole (PSTOCK-24, PUT since 2026-10-11).
+  // The route addresses the batch, so it is judged like the count it carries.
   rule('/plant-stock/:id/counts', readPlantStockSeason),
 
   // The plan is in the JSON body on these two, not in the URL.
@@ -303,15 +350,15 @@ export const RULES: SeasonWriteRule[] = [
   // The lot id arrives in the JSON BODY on this one, not in the URL — a POST to
   // a fixed path otherwise falls through every rule, and `/stock/adjust` was in
   // fact matched by `/stock/:id` and then skipped because `adjust` is not a UUID
-  // (STOCK-01). Nothing changes today: the route is ADMIN-only and an admin is
-  // exempt from the closed-season rule by design — only an administrator may
-  // correct a season that is already closed. It is listed so the day
-  // that route is opened to a permission, it is judged.
+  // (STOCK-01).
   rule('/stock/adjust', readStockItemSeason, body('stockItemId')),
   rule('/stock/:id', readStockItemSeason),
-  rule('/stock/:id/movements', readStockItemSeason),
   rule('/agri-inputs/:id', readAgriInputSeason),
   rule('/agri-inputs/:id/movements', readAgriInputSeason),
+  // These two are ADMIN-only, but "closed means final" (decided 2026-10-04)
+  // leaves no administrator exemption, so they are judged like any other write.
+  rule('/agri-inputs/:id/adjust', readAgriInputSeason),
+  rule('/harvested-products/:id/writeoff', readHarvestedProductSeason),
   rule('/tray-transport/sowing/:ssmSowingId', readSsmSeason),
   rule('/tray-transport/tunnel/:tunnelId', readTunnelSeason),
 
@@ -327,11 +374,14 @@ export const RULES: SeasonWriteRule[] = [
  * Refuses a change to a record that belongs to a season which is not the open
  * one (P4-09, which absorbed P2-05).
  *
- * One interceptor instead of a check inside every service, because the rule
- * needs the caller's role and a service has no idea who is calling. Threading
- * `isAdmin` down would have meant adding `@CurrentUser()` and an extra argument
- * to ~20 controller methods as well; here the request already carries both the
- * user and the URL.
+ * **Closed means final** (decided 2026-10-04): there is no longer an
+ * administrator override — nobody changes a closed season's record, so the rule
+ * needs nothing from the caller but the URL.
+ *
+ * One interceptor instead of a check inside every service, because the decision
+ * is about the ROUTE's record, not about the operation: a POST that reaches into
+ * an existing record can rewrite a closed season exactly as a PATCH can. Put in
+ * one place, the rule cannot drift between ~20 services.
  *
  * It judges every write, not only a change or a delete (P7-01): recording a
  * sowing against an old plan entry writes a NEW sowing and moves the OLD entry
@@ -364,7 +414,7 @@ export class SeasonWriteInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const request = context.switchToHttp().getRequest();
+    const request = context.switchToHttp().getRequest<SeasonWriteRequest>();
     const method = String(request?.method ?? '').toUpperCase();
 
     // Reads are judged too, and that is the other half of the rule (X-02): the
@@ -385,7 +435,6 @@ export class SeasonWriteInterceptor implements NestInterceptor {
     const target = this.findTarget(String(request?.url ?? ''), request);
 
     if (target) {
-      const isAdmin = request?.user?.role === UserRole.ADMIN;
       const { read, usedInClosedSeason, describedAs } = target.rule;
 
       if (read) {
@@ -396,7 +445,7 @@ export class SeasonWriteInterceptor implements NestInterceptor {
           // is revealed by asking for it.
           this.seasonService.assertReadable(recordSeasonId);
         } else {
-          await this.seasonService.assertWritable(recordSeasonId, isAdmin);
+          await this.seasonService.assertWritable(recordSeasonId);
         }
       } else if (usedInClosedSeason && isWrite) {
         // A global record (the product catalogue): the question is not which
@@ -407,9 +456,9 @@ export class SeasonWriteInterceptor implements NestInterceptor {
           target.id,
         );
 
-        if (!isAdmin && closedSeasonCode) {
+        if (closedSeasonCode) {
           throw new ConflictException(
-            `This ${describedAs ?? 'record'} is already used in season ${closedSeasonCode}, which is closed. Only an administrator can change it.`,
+            `This ${describedAs ?? 'record'} is already used in season ${closedSeasonCode}, which is closed, so it cannot be changed.`,
           );
         }
       }
@@ -434,12 +483,23 @@ export class SeasonWriteInterceptor implements NestInterceptor {
       if (!found) continue;
 
       const id = candidate.locate(request, found);
-      // A non-UUID id cannot name a row: leave it to the service instead of
-      // asking the database, which would only raise a Prisma validation error
-      // here, before the service gets to say anything (SEASON-05).
-      if (id && UUID_PATTERN.test(id)) {
-        return { rule: candidate, id };
+
+      // The id travels in the BODY on a literal route (no `:param`) — for
+      // example POST /stock/adjust. A value missing there is the service's
+      // business (its DTO says what is required), not this interceptor's.
+      if (!id && !candidate.path.includes(':')) {
+        return null;
       }
+      if (!id) continue;
+
+      // An id that is not a UUID can never name a row: answer as if the record
+      // were gone, instead of letting the database dress the same problem up as
+      // "invalid input" (SEASON-05).
+      if (!UUID_PATTERN.test(id)) {
+        throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+      }
+
+      return { rule: candidate, id };
     }
 
     return null;

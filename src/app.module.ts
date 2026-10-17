@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -20,6 +21,7 @@ import { AgriInputsModule } from './agri-inputs/agri-inputs.module';
 import { HarvestModule } from './harvest/harvest.module';
 import { ShipmentsModule } from './shipments/shipments.module';
 import { SeasonModule } from './season/season.module';
+import { SettingsModule } from './settings/settings.module';
 import { SeasonWriteInterceptor } from './season/season-write.interceptor';
 import { SeasonViewInterceptor } from './season/season-view.interceptor';
 import { SeasonFreshnessInterceptor } from './season/season-freshness.interceptor';
@@ -44,7 +46,14 @@ import { SeasonFreshnessInterceptor } from './season/season-freshness.intercepto
     HarvestModule,
     ShipmentsModule,
     SeasonModule,
+    SettingsModule,
     ConfigModule.forRoot({ isGlobal: true }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60_000, // 60 seconde
+        limit: 100, // Maximum 100 requests per minute
+      },
+    ]),
   ],
   // Global safety net: every exception reaches the client as a readable
   // `message`, including across phone/web clients.
@@ -60,6 +69,7 @@ import { SeasonFreshnessInterceptor } from './season/season-freshness.intercepto
     // Judges every write, and every read that names a record, against that
     // record's own season (P4-09 / P2-05 / P7-01 / X-02).
     { provide: APP_INTERCEPTOR, useClass: SeasonWriteInterceptor },
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],
 })
 export class AppModule {}

@@ -5,11 +5,12 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '../generated/prisma/client';
+import type { Delivery } from '../generated/prisma/client';
 import { StockService } from '../stock/stock.service';
 import { ReferenceType } from '../stock/enums/reference-type.enum';
-import { pooledLot } from '../stock/pooled-lot';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
 import { getPaginationParams } from '../common/pagination';
+import type { Paginated } from '../common/pagination';
 import { ERROR_MESSAGES } from '../common/error-messages';
 import { SeasonService } from '../season/season.service';
 import type { Actor } from '../common/actor';
@@ -46,14 +47,11 @@ export class DeliveriesService {
           lots: {
             create: lots.map((lot) => ({
               lotNumber: lot.lotNumber,
-              // What the stock pool will actually use: for peat that is
-              // 'GENERIC', not the client's BIO/CVT (DELIV-04), so the delivery
-              // row and the ledger agree about the same lot.
-              stockType: pooledLot({
-                productType: lot.productType,
-                lotNumber: lot.lotNumber,
-                stockType: lot.stockType ?? '',
-              }).stockType,
+              // Stored exactly as sent, peat included. A peat lot used to be
+              // rewritten to 'GENERIC' here so the row agreed with the single
+              // pooled stock item (DELIV-04); peat is tracked per lot now, so
+              // this row IS the pool's key and nothing is rewritten.
+              stockType: lot.stockType,
               quantity: lot.quantity,
               thousandSeedsPerGram: lot.thousandSeedsPerGram,
               productType: lot.productType,
@@ -66,12 +64,13 @@ export class DeliveriesService {
         include: { lots: true },
       });
 
-      // Update stock for each lot — passing tx ensures the same transaction
-      // Peat is pooled: all PEAT deliveries go into a single stock item
+      // Update stock for each lot — passing tx ensures the same transaction.
+      // Every lot has its own pool: lot number and stock type together.
       for (const lot of created.lots) {
         await this.stockService.addStock(
           {
-            ...pooledLot(lot),
+            lotNumber: lot.lotNumber,
+            stockType: lot.stockType,
             productType: lot.productType,
             quantity: lot.quantity,
             referenceId: lot.id,
@@ -154,7 +153,7 @@ export class DeliveriesService {
         page: pagination.page,
         pageSize: pagination.pageSize,
         hasMore: pagination.page * pagination.pageSize < total,
-      };
+      } satisfies Paginated<Delivery>;
     }
 
     return this.prismaService.delivery.findMany({
@@ -177,8 +176,16 @@ export class DeliveriesService {
     return delivery;
   }
 
-  async update(id: string, updateDeliveryDto: CreateDeliveryDto, actor: Actor) {
-    const { deliveryCode, deliveryDate, transport, lots } = updateDeliveryDto;
+  /**
+   * Replace a delivery's fields AND its lots, in one transaction.
+   *
+   * The body is the create shape, and that is deliberate (DEL-4): the old lots'
+   * stock is reversed and the new lots are applied, so "half a delivery" has no
+   * meaning here — an omitted lot would be a quantity silently dropped from the
+   * ledger. Both clients send the whole form on an edit.
+   */
+  async update(id: string, dto: CreateDeliveryDto, actor: Actor) {
+    const { deliveryCode, deliveryDate, transport, lots } = dto;
 
     // Convert date-only string to full ISO-8601 DateTime
     const deliveryDateISO = new Date(deliveryDate).toISOString();
@@ -205,12 +212,13 @@ export class DeliveriesService {
         existing.seasonId,
       );
 
-      // Reverse old stock: put back what the existing lots added. Peat uses the
-      // pooled lot number and stock type — see `pooledLot`.
+      // Reverse old stock: put back what the existing lots added, each into its
+      // own pool.
       for (const lot of existing.lots) {
         await this.stockService.removeStock(
           {
-            ...pooledLot(lot),
+            lotNumber: lot.lotNumber,
+            stockType: lot.stockType,
             productType: lot.productType,
             quantity: lot.quantity,
             referenceId: lot.id,
@@ -239,11 +247,7 @@ export class DeliveriesService {
           transport,
           lots: {
             create: lots.map((lot) => ({
-              stockType: pooledLot({
-                productType: lot.productType,
-                lotNumber: lot.lotNumber,
-                stockType: lot.stockType ?? '',
-              }).stockType,
+              stockType: lot.stockType,
               lotNumber: lot.lotNumber,
               quantity: lot.quantity,
               thousandSeedsPerGram: lot.thousandSeedsPerGram,
@@ -260,7 +264,8 @@ export class DeliveriesService {
       for (const lot of updated.lots) {
         await this.stockService.addStock(
           {
-            ...pooledLot(lot),
+            lotNumber: lot.lotNumber,
+            stockType: lot.stockType,
             productType: lot.productType,
             quantity: lot.quantity,
             referenceId: lot.id,
@@ -309,7 +314,8 @@ export class DeliveriesService {
           seasonId_productType_stockType_lotNumber: {
             seasonId,
             productType: lot.productType,
-            ...pooledLot(lot),
+            lotNumber: lot.lotNumber,
+            stockType: lot.stockType,
           },
         },
         select: { id: true },
@@ -333,25 +339,26 @@ export class DeliveriesService {
   }
 
   async remove(id: string, actor: Actor) {
+    
     return this.prismaService.$transaction(async (tx) => {
       // Inside the transaction, for the same reason as `update` (DELIV-01).
       const existing = await tx.delivery.findUnique({
         where: { id },
         include: { lots: true },
       });
-
+       
       if (!existing) {
         throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
       }
 
       await this.assertStockUnused(tx, existing.lots, existing.seasonId);
 
-      // Reverse stock for each lot. Peat uses the pooled lot number and stock
-      // type — see `pooledLot`.
+      // Reverse stock for each lot, each into its own pool.
       for (const lot of existing.lots) {
         await this.stockService.removeStock(
           {
-            ...pooledLot(lot),
+            lotNumber: lot.lotNumber,
+            stockType: lot.stockType,
             productType: lot.productType,
             quantity: lot.quantity,
             referenceId: lot.id,

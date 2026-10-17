@@ -67,14 +67,32 @@ const PERMISSIONS = [
   { name: 'harvest.view', description: 'View harvest records and products' },
   { name: 'harvest.create', description: 'Record harvests' },
   { name: 'harvest.delete', description: 'Delete harvest records' },
-  { name: 'shipments.view', description: 'View shipments' },
-  { name: 'shipments.create', description: 'Create shipments' },
-  { name: 'shipments.edit', description: 'Edit shipments' },
-  { name: 'shipments.delete', description: 'Delete shipments' },
-  { name: 'trucks.view', description: 'View trucks' },
-  { name: 'trucks.create', description: 'Add trucks and their plates' },
-  { name: 'trucks.edit', description: 'Edit trucks and their plates' },
-  { name: 'trucks.delete', description: 'Delete trucks' },
+
+  // --- Trucks, and the shipments they carry ---
+  //
+  // ONE module, ONE set of permissions (decided 2026-10-13). A shipment is only
+  // ever reached through the truck it went out on: that screen needs
+  // `trucks.view` and the loads arrive inside its answer. So a separate
+  // `shipments.*` could not hide anything — granting "trucks only" still showed
+  // every load, while "shipments only" showed nothing at all, because no screen
+  // was gated on it. It was a toggle the admin UI offered with no effect.
+  //
+  // The same shape as tray transport riding `sowing.*` (TRAY-05).
+  //
+  // NOTE: the four `shipments.*` rows are gone from this list, and the prune at
+  // the end of this file deletes undeclared permissions along with every grant
+  // of them. The merge block below carries those grants over to `trucks.*`
+  // FIRST, so nobody loses their only way in.
+  { name: 'trucks.view', description: 'View trucks and their shipments' },
+  {
+    name: 'trucks.create',
+    description: 'Add trucks, their plates and shipments',
+  },
+  {
+    name: 'trucks.edit',
+    description: 'Edit trucks, their plates and shipments',
+  },
+  { name: 'trucks.delete', description: 'Delete trucks and shipments' },
 
   // --- Crop care (irrigation & treatment plans and operations) ---
   {
@@ -121,6 +139,49 @@ async function main() {
       create: perm,
     });
     console.log(`  ✅ ${perm.name}`);
+  }
+
+  // Carry the `shipments.*` grants over to their `trucks.*` equivalent BEFORE the
+  // prune below removes them (decided 2026-10-13). Without this, anybody who held
+  // a shipments action and not the matching trucks one would be left with no way
+  // into the module at all — the prune cascades to the grants.
+  const MERGED_INTO_TRUCKS: Record<string, string> = {
+    'shipments.view': 'trucks.view',
+    'shipments.create': 'trucks.create',
+    'shipments.edit': 'trucks.edit',
+    'shipments.delete': 'trucks.delete',
+  };
+
+  for (const [from, to] of Object.entries(MERGED_INTO_TRUCKS)) {
+    const source = await prisma.permission.findUnique({
+      where: { name: from },
+    });
+    // Already merged on an earlier run: there is nothing left to carry.
+    if (!source) continue;
+
+    const target = await prisma.permission.findUnique({ where: { name: to } });
+    if (!target) continue;
+
+    const grants = await prisma.userPermission.findMany({
+      where: { permissionId: source.id },
+    });
+
+    for (const grant of grants) {
+      await prisma.userPermission.upsert({
+        where: {
+          userId_permissionId: {
+            userId: grant.userId,
+            permissionId: target.id,
+          },
+        },
+        update: {},
+        create: { userId: grant.userId, permissionId: target.id },
+      });
+    }
+
+    if (grants.length > 0) {
+      console.log(`  ↩️  Carried ${grants.length} × ${from} over to ${to}`);
+    }
   }
 
   // Drop permissions that are no longer declared above so the admin UI never

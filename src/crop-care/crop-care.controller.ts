@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Put,
   Delete,
   Param,
   Body,
@@ -19,6 +20,7 @@ import {
   CreatePhytosanitaryProgramDto,
   UpdatePhytosanitaryProgramDto,
   CreateCropOperationDto,
+  UpdateCropOperationDto,
   CreateCropCarePlanDto,
   CreatePlanEntryDto,
   UpdatePlanStatusDto,
@@ -146,6 +148,23 @@ export class CropCareController {
     return this.cropCareService.deleteOperation(id, user);
   }
 
+  /**
+   * Correct a logged operation (CROP-14).
+   *
+   * `crop-care.edit` and not `create`: correcting the record is an edit of
+   * something already filed, and that permission already exists and is enforced
+   * one route above (the plan status). No new permission was invented.
+   */
+  @Put('crop-operations/:id')
+  @RequirePermissions('crop-care.edit')
+  updateOperation(
+    @Param('id') id: string,
+    @Body() dto: UpdateCropOperationDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.cropCareService.updateOperation(id, dto, user);
+  }
+
   // ============================================================
   // Crop care plans
   // ============================================================
@@ -188,7 +207,7 @@ export class CropCareController {
     return this.cropCareService.updatePlanStatus(
       id,
       dto.status,
-      user.role === UserRole.ADMIN,
+      user.role === UserRole.ADMIN.toString(),
     );
   }
 

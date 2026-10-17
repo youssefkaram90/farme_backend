@@ -14,8 +14,12 @@ import { PlanType, PlanStatus, PlanEntryStatus } from './enums/plan-type.enum';
 import * as XlsxPopulate from 'xlsx-populate';
 import { getPaginationParams } from '../common/pagination';
 import { ERROR_MESSAGES } from '../common/error-messages';
-import { deriveSeedsPerRowMetre } from '../common/sowing.constants';
+import {
+  deriveSeedsPerRowMetre,
+  plannedSeedsFromRate,
+} from '../common/sowing.constants';
 import { SeasonService } from '../season/season.service';
+import { SettingsService } from '../settings/settings.service';
 import {
   FINISHED_ENTRY_STATUSES,
   summarisePlanProgress,
@@ -23,12 +27,85 @@ import {
 } from './plan-entry-progress';
 import { StockType } from '../deliveries/enums/stock-type.enum';
 
+interface ExcelRange {
+  value(): unknown[][];
+}
+
+interface ExcelSheet {
+  usedRange(): ExcelRange | undefined;
+}
+
+interface ExcelWorkbook {
+  sheet(index: number): ExcelSheet | undefined;
+}
+
+interface XlsxPopulateApi {
+  fromDataAsync(data: Buffer): Promise<ExcelWorkbook>;
+}
+
 @Injectable()
 export class SowingPlanService {
   constructor(
     private prismaService: PrismaService,
     private seasonService: SeasonService,
+    private settingsService: SettingsService,
   ) {}
+
+  private excelCellToString(value: unknown): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean'
+    ) {
+      return String(value);
+    }
+
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+
+    return '';
+  }
+
+  /**
+   * The density a field (LPM) line is planned at, in seeds per row-metre.
+   *
+   * One figure for the whole farm and the same for every variety (user,
+   * 2026-10-11), kept in the settings table so it can be changed without a
+   * developer. Read once per request wherever several lines are planned at once.
+   */
+  private planningRate(): Promise<number> {
+    return this.settingsService.get('DEFAULT_SEEDS_PER_ROW_METRE');
+  }
+
+  /**
+   * What ONE field line is planned to need, at that density.
+   *
+   *   seeds = lines x metresPerLine x rows per line x seeds per row-metre
+   *
+   * The planners think in a density ("about 120 seeds a metre of row"), not in a
+   * seed total, so the total is worked out here instead of being typed into a
+   * form. The rate USED is stored on the entry beside it.
+   */
+  private lpmPlanning(
+    rate: number,
+    lines: number,
+    metresPerLine: number,
+  ): { plannedQuantity: number; seedsPerMeter: number } {
+    const plannedQuantity = plannedSeedsFromRate(rate, lines, metresPerLine);
+
+    if (plannedQuantity === undefined) {
+      throw new BadRequestException(
+        'LPM plan entries require lines and metersPerLine',
+      );
+    }
+
+    return { plannedQuantity, seedsPerMeter: rate };
+  }
 
   // ============================================================
   // PLANS
@@ -199,9 +276,9 @@ export class SowingPlanService {
     const plan = await this.findPlanById(id);
 
     // Already there: nothing to do, and nothing to refuse.
-    if (plan.status === status) return plan;
+    if (plan.status === status.toString()) return plan;
 
-    if (plan.status === PlanStatus.COMPLETED) {
+    if (plan.status === PlanStatus.COMPLETED.toString()) {
       if (status !== PlanStatus.IN_PROGRESS) {
         throw new BadRequestException(
           'A completed plan can only be reopened to In progress.',
@@ -262,7 +339,7 @@ export class SowingPlanService {
       throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
     }
 
-    if (entry.status !== PlanEntryStatus.CLOSED) {
+    if (entry.status !== PlanEntryStatus.CLOSED.toString()) {
       throw new BadRequestException(
         'Only a closed plan entry can be reopened.',
       );
@@ -301,6 +378,11 @@ export class SowingPlanService {
       }
     }
 
+    // A field line is planned by its DENSITY, not by a seed total (user,
+    // 2026-10-11): read the farm's figure once for the whole plan.
+    const planningRate =
+      dto.planType === PlanType.LPM ? await this.planningRate() : null;
+
     if (dto.planType === PlanType.LPM) {
       if (!dto.location) {
         throw new BadRequestException('LPM plan requires a location');
@@ -312,11 +394,6 @@ export class SowingPlanService {
         if (!entry.metersPerLine) {
           throw new BadRequestException(
             'LPM plan entries require metersPerLine',
-          );
-        }
-        if (!entry.plannedQuantity) {
-          throw new BadRequestException(
-            'Please enter the planned quantity in seeds.',
           );
         }
       }
@@ -363,36 +440,40 @@ export class SowingPlanService {
         autoSectorId = sector.id;
       }
 
-      const entriesData = await Promise.all(
-        dto.entries.map(async (e) => {
-          // Per-entry sector wins; otherwise fall back to the plan-level auto sector.
-          const sectorId = e.sectorId || autoSectorId;
+      const entriesData = dto.entries.map((e) => {
+        // Per-entry sector wins; otherwise fall back to the plan-level auto sector.
+        const sectorId = e.sectorId || autoSectorId;
 
-          return {
-            planId: plan.id,
-            variety: e.variety,
-            stockType: e.stockType,
-            peat: e.peat ?? null,
-            plannedDate:
-              e.plannedDate instanceof Date
-                ? e.plannedDate
-                : new Date(e.plannedDate),
-            plannedTrays: e.plannedTrays,
-            plannedQuantity: e.plannedQuantity,
-            sectorId,
-            lines: e.lines,
-            metersPerLine: e.metersPerLine,
-            // Derived — never taken from the client, so a plan and the sowing
-            // that executes it cannot disagree about the seed rate.
-            seedsPerMeter: deriveSeedsPerRowMetre(
-              e.plannedQuantity,
-              e.lines,
-              e.metersPerLine,
-            ),
-            remark: e.remark,
-          };
-        }),
-      );
+        // A field line's seed total is DERIVED from the density the farm plans
+        // at — whatever a client sends is ignored. A tunnel line still carries
+        // its own total (the trays x seeds per tray the plan compares against).
+        const planning =
+          planningRate !== null
+            ? this.lpmPlanning(planningRate, e.lines!, e.metersPerLine!)
+            : null;
+
+        return {
+          planId: plan.id,
+          variety: e.variety,
+          stockType: e.stockType,
+          peat: e.peat ?? null,
+          plannedDate:
+            e.plannedDate instanceof Date
+              ? e.plannedDate
+              : new Date(e.plannedDate),
+          plannedTrays: e.plannedTrays,
+          plannedQuantity: planning
+            ? planning.plannedQuantity
+            : e.plannedQuantity,
+          sectorId,
+          lines: e.lines,
+          metersPerLine: e.metersPerLine,
+          // The rate this plan was made at, stored rather than looked up later,
+          // so changing the setting does not rewrite an existing plan.
+          seedsPerMeter: planning ? planning.seedsPerMeter : undefined,
+          remark: e.remark,
+        };
+      });
 
       await tx.sowingPlanEntry.createMany({ data: entriesData });
 
@@ -429,7 +510,8 @@ export class SowingPlanService {
     const buffer = Buffer.from(dto.excelBase64, 'base64');
 
     // Parse Excel
-    const workbook = await XlsxPopulate.fromDataAsync(buffer as any);
+    const xlsxPopulate = XlsxPopulate as unknown as XlsxPopulateApi;
+    const workbook = await xlsxPopulate.fromDataAsync(buffer);
     const sheet = workbook.sheet(0);
     if (!sheet) {
       throw new BadRequestException('Excel file has no sheets');
@@ -440,7 +522,7 @@ export class SowingPlanService {
       throw new BadRequestException('Excel sheet is empty');
     }
 
-    const rows = usedRange.value() as unknown[][];
+    const rows = usedRange.value();
     if (rows.length < 2) {
       throw new BadRequestException(
         'Excel file must have a header row and at least one data row',
@@ -483,7 +565,9 @@ export class SowingPlanService {
         !row ||
         row.every(
           (cell) =>
-            cell === undefined || cell === null || String(cell).trim() === '',
+            cell === undefined ||
+            cell === null ||
+            this.excelCellToString(cell).trim() === '',
         )
       ) {
         continue; // skip empty rows
@@ -493,7 +577,9 @@ export class SowingPlanService {
         const idx = headers.indexOf(colName.toLowerCase());
         if (idx === -1) return '';
         const val = row[idx];
-        return val === undefined || val === null ? '' : String(val).trim();
+        return val === undefined || val === null
+          ? ''
+          : this.excelCellToString(val).trim();
       };
 
       const getCellNum = (colName: string): number | undefined => {
@@ -701,25 +787,30 @@ export class SowingPlanService {
     const plan = await this.findPlanById(planId);
 
     // Validate that SSM plans have SSM fields and LPM plans have LPM fields
-    if (plan.planType === PlanType.SSM) {
+    if (plan.planType === PlanType.SSM.toString()) {
       if (!dto.plannedTrays) {
         throw new BadRequestException('SSM plan entries require plannedTrays');
       }
     }
 
-    if (plan.planType === PlanType.LPM) {
+    if (plan.planType === PlanType.LPM.toString()) {
       if (!dto.lines) {
         throw new BadRequestException('LPM plan entries require lines');
       }
       if (!dto.metersPerLine) {
         throw new BadRequestException('LPM plan entries require metersPerLine');
       }
-      if (!dto.plannedQuantity) {
-        throw new BadRequestException(
-          'LPM plan entries require plannedQuantity',
-        );
-      }
     }
+
+    // A field line's seed total comes from the density, not from the form.
+    const planning =
+      plan.planType === PlanType.LPM.toString()
+        ? this.lpmPlanning(
+            await this.planningRate(),
+            dto.lines!,
+            dto.metersPerLine!,
+          )
+        : null;
 
     const plannedDate =
       dto.plannedDate instanceof Date
@@ -734,15 +825,13 @@ export class SowingPlanService {
         peat: dto.peat ?? null,
         plannedDate,
         plannedTrays: dto.plannedTrays,
-        plannedQuantity: dto.plannedQuantity,
+        plannedQuantity: planning
+          ? planning.plannedQuantity
+          : dto.plannedQuantity,
         sectorId: dto.sectorId,
         lines: dto.lines,
         metersPerLine: dto.metersPerLine,
-        seedsPerMeter: deriveSeedsPerRowMetre(
-          dto.plannedQuantity,
-          dto.lines,
-          dto.metersPerLine,
-        ),
+        seedsPerMeter: planning ? planning.seedsPerMeter : undefined,
         remark: dto.remark,
       },
     });
@@ -751,15 +840,19 @@ export class SowingPlanService {
   async addBulkEntries(planId: string, dtos: CreatePlanEntryDto[]) {
     const plan = await this.findPlanById(planId);
 
+    const isLPM = plan.planType === PlanType.LPM.toString();
+    // ONE settings read for the whole batch of lines, not one per line.
+    const rate = isLPM ? await this.planningRate() : 0;
+
     const data = dtos.map((dto) => {
-      if (plan.planType === PlanType.SSM) {
+      if (plan.planType === PlanType.SSM.toString()) {
         if (!dto.plannedTrays) {
           throw new BadRequestException(
             'SSM plan entries require plannedTrays',
           );
         }
       }
-      if (plan.planType === PlanType.LPM) {
+      if (plan.planType === PlanType.LPM.toString()) {
         if (!dto.lines) {
           throw new BadRequestException('LPM plan entries require lines');
         }
@@ -768,12 +861,12 @@ export class SowingPlanService {
             'LPM plan entries require metersPerLine',
           );
         }
-        if (!dto.plannedQuantity) {
-          throw new BadRequestException(
-            'LPM plan entries require plannedQuantity',
-          );
-        }
       }
+
+      // A field line's seed total comes from the density, not from the form.
+      const planning = isLPM
+        ? this.lpmPlanning(rate, dto.lines!, dto.metersPerLine!)
+        : null;
 
       const plannedDate =
         dto.plannedDate instanceof Date
@@ -787,15 +880,13 @@ export class SowingPlanService {
         peat: dto.peat ?? null,
         plannedDate,
         plannedTrays: dto.plannedTrays,
-        plannedQuantity: dto.plannedQuantity,
+        plannedQuantity: planning
+          ? planning.plannedQuantity
+          : dto.plannedQuantity,
         sectorId: dto.sectorId,
         lines: dto.lines,
         metersPerLine: dto.metersPerLine,
-        seedsPerMeter: deriveSeedsPerRowMetre(
-          dto.plannedQuantity,
-          dto.lines,
-          dto.metersPerLine,
-        ),
+        seedsPerMeter: planning ? planning.seedsPerMeter : undefined,
         remark: dto.remark,
       };
     });
@@ -910,13 +1001,30 @@ export class SowingPlanService {
       throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
     }
 
-    if (entry.status === PlanEntryStatus.EXECUTED) {
+    if (entry.status === PlanEntryStatus.EXECUTED.toString()) {
       throw new BadRequestException(
         'Cannot update a fully executed plan entry',
       );
     }
 
-    const isSSM = entry.plan.planType === PlanType.SSM;
+    /**
+     * A closed line is corrected by REOPENING it first (SOW-13).
+     *
+     * Every other layer already says so: both clients hide "correct" behind the
+     * same rule and offer Reopen beside it, and the sowings path refuses a closed
+     * entry outright (SPLAN-02). The API was the one place still willing to do it —
+     * and this is not a harmless extra permission. `syncPlanEntryProgress` skips
+     * closed entries on purpose ("CLOSED is final"), so writing new plan figures
+     * onto one would leave its executed counters and its status holding the numbers
+     * from before, with nothing left that ever recomputes them.
+     */
+    if (entry.status === PlanEntryStatus.CLOSED.toString()) {
+      throw new BadRequestException(
+        'This line is closed. Reopen it first if you need to correct it.',
+      );
+    }
+
+    const isSSM = entry.plan.planType === PlanType.SSM.toString();
 
     // The same requirements `addEntry` applies: the entry must keep a planned
     // figure its own plan type can compare against.
@@ -931,12 +1039,16 @@ export class SowingPlanService {
       if (!dto.metersPerLine) {
         throw new BadRequestException('LPM plan entries require metersPerLine');
       }
-      if (!dto.plannedQuantity) {
-        throw new BadRequestException(
-          'LPM plan entries require plannedQuantity',
-        );
-      }
     }
+
+    // A field line's seed total comes from the density, not from the form.
+    const planning = isSSM
+      ? null
+      : this.lpmPlanning(
+          await this.planningRate(),
+          dto.lines!,
+          dto.metersPerLine!,
+        );
 
     const plannedDate =
       dto.plannedDate instanceof Date
@@ -955,17 +1067,11 @@ export class SowingPlanService {
           // rather than left behind, so a row corrupted by the old behaviour
           // heals when it is next edited.
           plannedTrays: isSSM ? dto.plannedTrays : null,
-          plannedQuantity: isSSM ? null : dto.plannedQuantity,
+          plannedQuantity: isSSM ? null : planning!.plannedQuantity,
           sectorId: dto.sectorId,
           lines: isSSM ? null : dto.lines,
           metersPerLine: isSSM ? null : dto.metersPerLine,
-          seedsPerMeter: isSSM
-            ? null
-            : deriveSeedsPerRowMetre(
-                dto.plannedQuantity,
-                dto.lines,
-                dto.metersPerLine,
-              ),
+          seedsPerMeter: isSSM ? null : planning!.seedsPerMeter,
           remark: dto.remark,
         },
       });
@@ -993,11 +1099,11 @@ export class SowingPlanService {
       throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
     }
 
-    if (entry.status === PlanEntryStatus.EXECUTED) {
+    if (entry.status === PlanEntryStatus.EXECUTED.toString()) {
       throw new BadRequestException('Plan entry is already fully executed');
     }
 
-    if (entry.status === PlanEntryStatus.CLOSED) {
+    if (entry.status === PlanEntryStatus.CLOSED.toString()) {
       return entry;
     }
 
@@ -1016,7 +1122,7 @@ export class SowingPlanService {
       throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
     }
 
-    if (entry.status === PlanEntryStatus.EXECUTED) {
+    if (entry.status === PlanEntryStatus.EXECUTED.toString()) {
       throw new BadRequestException(
         'Cannot delete a fully executed plan entry',
       );

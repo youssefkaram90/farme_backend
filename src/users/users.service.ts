@@ -73,6 +73,10 @@ export class UsersService {
    * Unpaginated on purpose (decided 2026-10-01): this is a farm's staff list —
    * tens of rows — and no screen polls it. Revisit if it grows into the hundreds;
    * paging with no paging UI would silently hide people.
+   *
+   * Ordered by name: without an `orderBy` the database is free to hand the rows
+   * back in any order, which shows up as the list quietly reshuffling between
+   * visits (U-6).
    */
   async getUsers(q?: string) {
     const where = q
@@ -87,6 +91,7 @@ export class UsersService {
 
     return this.prismaService.user.findMany({
       where,
+      orderBy: [{ name: 'asc' }, { lastName: 'asc' }],
       omit: {
         password: true,
       },

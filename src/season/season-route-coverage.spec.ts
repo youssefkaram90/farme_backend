@@ -12,8 +12,12 @@ import { RULES } from './season-write.interceptor';
  * cannot quietly fall outside. No database and no running server: it only reads
  * source.
  *
- * A route that carries its record id in the BODY (the two `/execute` routes)
- * cannot be seen here; those still need a human eye.
+ * A route that carries its record id in the BODY — `POST /sowing-ssm/execute`,
+ * `POST /sowing-lpm/execute`, `POST /stock/adjust` — has no `:` in its path, so
+ * the scan above cannot see it. Those routes declare themselves with
+ * `@SeasonIdInBody(...)`, and the tests below require a matching rule for each,
+ * so a NEW body-carried route fails this spec until it is judged (provided its
+ * handler carries the marker).
  */
 
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -28,16 +32,15 @@ const EXEMPT: Record<string, string> = {
     'ADMIN-only: opening a season is never a grantable permission',
   'POST /seasons/:id/close':
     'ADMIN-only: closing a season is never a grantable permission',
-  'GET /seasons/:id': 'ADMIN-only: a closed season is only for administrators',
   'GET /seasons/:id/close-preview': 'ADMIN-only',
   'PATCH /users/:id/role': 'ADMIN-only',
   'GET /users/:id': 'a user is not season-scoped',
   'POST /permissions/users/:userId': 'ADMIN-only',
   'GET /permissions/users/:userId': 'permissions are not season-scoped',
-  'POST /agri-inputs/:id/adjust': 'ADMIN-only',
-  'POST /harvested-products/:id/writeoff': 'ADMIN-only',
   'GET /phytosanitary-products/:id':
     'the product catalogue is GLOBAL — typed once, not per season — so it belongs to no season',
+  'PATCH /settings/:key':
+    'a setting is not season-scoped — it applies to the app, not to a season',
 };
 
 type Route = { method: string; path: string };
@@ -88,8 +91,46 @@ function collectRoutes(): Route[] {
   return routes;
 }
 
+/**
+ * Routes whose record id travels in the BODY, found by the `@SeasonIdInBody()`
+ * marker on their handler.
+ *
+ * The marker is what makes such a route visible to a source scan: without it a
+ * body-carried route has no `:id` in its path, so `collectRoutes()` walks past
+ * it and it is never required to have a season rule.
+ */
+function collectBodyIdRoutes(): Route[] {
+  const routes: Route[] = [];
+
+  for (const file of controllerFiles(join(__dirname, '..'))) {
+    const source = readFileSync(file, 'utf8');
+    const prefix =
+      (/@Controller\(\s*(?:'([^']*)')?\s*\)/.exec(source) ?? [])[1] ?? '';
+
+    for (const marker of source.matchAll(/@SeasonIdInBody\(/g)) {
+      // The nearest route decorator ABOVE the marker is the handler it marks.
+      const above = source.slice(0, marker.index ?? 0);
+      const found = [
+        ...above.matchAll(
+          /@(Post|Put|Patch|Delete|Get)\(\s*(?:'([^']*)')?\s*\)/g,
+        ),
+      ];
+      const route = found[found.length - 1];
+      if (!route) continue;
+
+      routes.push({
+        method: route[1].toUpperCase(),
+        path: normalise(joinPath(prefix, route[2] ?? '')),
+      });
+    }
+  }
+
+  return routes;
+}
+
 describe('season scope coverage', () => {
   const routes = collectRoutes();
+  const bodyIdRoutes = collectBodyIdRoutes();
   const judged = new Set(RULES.map((rule) => normalise(rule.path)));
   const exempt = new Map(
     Object.entries(EXEMPT).map(([key, reason]) => [normalise(key), reason]),
@@ -122,5 +163,28 @@ describe('season scope coverage', () => {
     );
 
     expect([...exempt.keys()].filter((key) => !known.has(key))).toEqual([]);
+  });
+
+  it('finds the body-carried routes - a broken scan must not pass on nothing', () => {
+    expect(bodyIdRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('judges every route whose record id travels in the body', () => {
+    const unjudged = bodyIdRoutes
+      .map((route) => `${route.method} ${route.path}`)
+      .filter((key) => !judged.has(normalise(key).split(' ')[1] ?? ''))
+      .filter((key) => !exempt.has(normalise(key)));
+
+    expect(unjudged).toEqual([]);
+  });
+
+  it('marks every rule that reads its record id from the body', () => {
+    const marked = new Set(bodyIdRoutes.map((route) => normalise(route.path)));
+
+    const unmarked = RULES.filter((rule) => !rule.path.includes(':'))
+      .map((rule) => normalise(rule.path))
+      .filter((path) => !marked.has(path));
+
+    expect(unmarked).toEqual([]);
   });
 });

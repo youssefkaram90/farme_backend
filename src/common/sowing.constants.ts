@@ -28,6 +28,16 @@ export const TRAYS_PER_PEAT_BALL = 380;
 export const DEFAULT_SEEDS_PER_TRAY = 285;
 
 /**
+ * Where a batch sits before its trays have been transported — and where the
+ * trays that are still WAITING are reported (PSTOCK-22).
+ *
+ * This is a value, not a label: the clients group their location lists by this
+ * exact text (`r.location || "Not assigned"`), so changing the string changes
+ * what the screens show.
+ */
+export const UNASSIGNED_LOCATION = 'Not assigned';
+
+/**
  * Two spellings of the same variety are the same variety.
  *
  * `toLowerCase()` and `toLocaleLowerCase()` disagree on a Turkish keyboard (the
@@ -67,4 +77,38 @@ export function deriveSeedsPerRowMetre(
   if (!seeds || !lines || !metresPerLine) return undefined;
   const rowMetres = toRowMetres(lines, metresPerLine);
   return rowMetres > 0 ? Math.round(seeds / rowMetres) : undefined;
+}
+
+/**
+ * The density a field (LPM) line is PLANNED at, in seeds per row-metre.
+ *
+ * This is the rate the farm WISHES, and it is the same for every variety: it exists
+ * so a planner can say what a line needs without working out a seed total by hand
+ * (user, 2026-10-11).
+ *
+ * It is a SETTING (SOW-11), so the farm can change it without a developer — and
+ * every plan entry stores the rate it was planned with, so changing this does not
+ * rewrite plans already made.
+ *
+ * PLANNING ONLY. A plan is a forecast; what a sowing actually used is recorded when
+ * it is executed, from the seed that really went in.
+ */
+export const DEFAULT_SEEDS_PER_ROW_METRE = 120;
+
+/**
+ * The seeds one field (LPM) line needs, from the density it is planned at — the
+ * inverse of `deriveSeedsPerRowMetre`, and the formula the planners use:
+ *
+ *   seeds = lines x metresPerLine x ROWS_PER_LINE x seeds per row-metre
+ *
+ * Returns undefined when a figure is missing, so a caller can refuse in its own
+ * words instead of storing a zero.
+ */
+export function plannedSeedsFromRate(
+  seedsPerRowMetre?: number | null,
+  lines?: number | null,
+  metresPerLine?: number | null,
+): number | undefined {
+  if (!seedsPerRowMetre || !lines || !metresPerLine) return undefined;
+  return Math.round(toRowMetres(lines, metresPerLine) * seedsPerRowMetre);
 }

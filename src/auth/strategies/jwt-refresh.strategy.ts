@@ -1,11 +1,34 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import type { Request } from 'express';
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { Request } from 'express';
-import { TokenPayload } from '../token-payload';
-import { AuthService } from '../auth.service';
+
 import { ERROR_MESSAGES } from '../../common/error-messages';
+import { AuthService } from '../auth.service';
+import { RefreshTokenPayload } from '../token-payload';
+
+function extractRefreshToken(request: Request): string | null {
+  const typedRequest = request as unknown as {
+    cookies?: Record<string, unknown>;
+  };
+
+  const cookieToken = typedRequest.cookies?.['Refresh'];
+
+  if (typeof cookieToken === 'string' && cookieToken.length > 0) {
+    return cookieToken;
+  }
+
+  const authHeader = request.headers.authorization;
+
+  if (typeof authHeader !== 'string') {
+    return null;
+  }
+
+  const match = /^Bearer\s+(\S+)$/i.exec(authHeader);
+
+  return match?.[1] ?? null;
+}
 
 @Injectable()
 export class JwtRefreshStrategy extends PassportStrategy(
@@ -17,26 +40,20 @@ export class JwtRefreshStrategy extends PassportStrategy(
     private readonly authService: AuthService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        JwtRefreshStrategy.refreshTokenExtractor,
-      ]),
+      jwtFromRequest: ExtractJwt.fromExtractors([extractRefreshToken]),
       secretOrKey: configService.getOrThrow<string>('JWT_REFRESH_TOKEN_SECRET'),
       passReqToCallback: true,
     });
   }
 
-  private static refreshTokenExtractor(request: Request) {
-    if (request.cookies?.Refresh) return request.cookies.Refresh;
+  async validate(request: Request, payload: RefreshTokenPayload) {
+    const token = extractRefreshToken(request);
 
-    const refreshToken = request.headers.authorization;
-    if (!refreshToken?.startsWith('Bearer')) return null;
-
-    return refreshToken.split(' ')[1];
-  }
-
-  async validate(request: Request, payload: TokenPayload) {
-    const token = JwtRefreshStrategy.refreshTokenExtractor(request);
     if (!token) {
+      throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
+    }
+
+    if (payload.type !== 'refresh' || !payload.jti) {
       throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
     }
 

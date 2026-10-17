@@ -90,7 +90,7 @@ class FakeUsers {
   private matches(row: Row, where: Record<string, unknown>): boolean {
     return Object.entries(where).every(([key, value]) => {
       if (key !== 'id' && key !== 'name') return true;
-      return row[key as 'id' | 'name'] === value;
+      return row[key] === value;
     });
   }
 

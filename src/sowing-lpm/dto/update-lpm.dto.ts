@@ -6,10 +6,12 @@ import { ExecuteLPMDto } from './execute-lpm.dto';
  * The edit form's body: every field of `ExecuteLPMDto`, all optional (SSM-03 —
  * the same defect in the LPM twin, which shared its create dto with PATCH).
  *
- * `sectorId` is re-declared to accept an explicit `null`, so a sowing can be
- * taken out of a sector; leaving the field out keeps the sector it has. Without
- * the `null` there is no way to express "no sector", because the service reads
- * an absent id as "keep".
+ * `sectorId` is re-declared to accept an explicit `null`, so a request can SAY
+ * "no sector" — the service refuses it with a plain sentence (PSTOCK-20 (i): a
+ * field sowing always belongs to one). Leaving the field out keeps the sector it
+ * has. Accepting the `null` here is what makes that refusal possible at all:
+ * without it the request would be rejected by the validation pipe instead, with
+ * a message that explains nothing.
  *
  * It is **omitted** from the mapped type before being re-declared: a subclass
  * cannot widen a property it inherits (`Partial<ExecuteLPMDto>` says

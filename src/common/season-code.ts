@@ -1,3 +1,15 @@
+/**
+ * The single 1-July season rule.
+ *
+ * Season boundaries are read and written in UTC (decided 2026-09-30): a stored
+ * instant must not shift when the server or a container changes timezone, and a
+ * UTC ISO string from a client has to land in the season it names.
+ *
+ * A season's boundaries are STORED on its row and never recomputed, so a change
+ * to this rule cannot re-label an existing season. Anything that needs to know
+ * which season a date falls in must READ THE ROW — see
+ * `SeasonService.assertDateInSeason()` — never compute it from this rule.
+ */
 export const SEASON_START_MONTH = 7;
 export const SEASON_START_DAY = 1;
 
@@ -7,36 +19,18 @@ function twoDigits(year: number): string {
   return String(year % 100).padStart(2, '0');
 }
 
-/**
- * Season boundaries are read and written in UTC (decided 2026-09-30): a stored
- * instant must not shift when the server or a container changes timezone, and a
- * UTC ISO string from a client has to land in the season it names.
- */
-export function seasonStartYear(date: Date): number {
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth() + 1;
-  const day = date.getUTCDate();
-
-  const afterStart =
-    month > SEASON_START_MONTH ||
-    (month === SEASON_START_MONTH && day >= SEASON_START_DAY);
-
-  return afterStart ? year : year - 1;
-}
-
 /** 2026 -> "26-27" */
 export function seasonCodeFromStartYear(startYear: number): string {
   return `${twoDigits(startYear)}-${twoDigits(startYear + 1)}`;
 }
 
-/** Any date -> the season it falls in, e.g. new Date(2027, 0, 5) -> "26-27". */
-export function seasonCodeFromDate(date: Date): string {
-  return seasonCodeFromStartYear(seasonStartYear(date));
-}
-
 /**
  * True when the code is well formed AND its two years are consecutive,
  * so "26-28" and "6-27" are both rejected.
+ *
+ * This is the authority for the rule. `Frontend/app/(app)/seasons/page.tsx`
+ * mirrors it by hand so the create form can answer without a round-trip — if
+ * this rule changes, change that copy too.
  */
 export function isValidSeasonCode(code: string): boolean {
   const match = SEASON_CODE_PATTERN.exec(code);

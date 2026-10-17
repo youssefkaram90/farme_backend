@@ -14,6 +14,7 @@ import {
   seasonBounds,
   startYearFromCode,
 } from '../common/season-code';
+import type { Actor } from '../common/actor';
 import { seasonViewStore } from './season-view.store';
 
 /** The open season, as held in memory. */
@@ -159,10 +160,19 @@ export class SeasonService implements OnModuleInit {
       select: { startDate: true, endDate: true },
     });
     if (!openRow) {
+      // The cached open season points at a row that no longer exists — deleted
+      // by hand, a restore, a partial migration. Reporting ALIGNED here would
+      // answer "everything is fine" for the one state where nothing is, so say
+      // plainly that there is no usable open season. The freshness interceptor
+      // re-reads the open season on the next request, which is the self-heal.
       return {
-        state: 'ALIGNED',
+        state: 'NONE',
         coversToday: covering?.code ?? null,
-        message: null,
+        message: `No season is open right now. ${
+          isAdmin
+            ? 'Check the seasons and open the right one.'
+            : 'Ask an administrator to check the seasons.'
+        }`,
       };
     }
 
@@ -307,21 +317,17 @@ export class SeasonService implements OnModuleInit {
    * Refuse a change to a record that belongs to a season that is not the open
    * one.
    *
-   * The rule is asymmetric on purpose, and it is the same rule as everywhere
-   * else in the season work: **the open season stamps new records, a record's
-   * own season governs existing ones**. Changing a closed season's figures after
-   * they have been reported would quietly rewrite what somebody already has on
-   * paper — so a normal user is refused, and only an administrator may still
-   * correct it.
+   * **Closed means final** (decided 2026-10-04): a season that has been closed
+   * is never changed again, by anyone — not even an administrator. A closed
+   * season's figures are what somebody already has on paper, and correcting them
+   * afterwards would silently rewrite reported history. There is no escape
+   * hatch: a mistake found after a close can only be fixed in the database.
    *
    * Called by `SeasonWriteInterceptor` for every write that names a
-   * season-scoped record, and for every read of one (`assertReadable`).
+   * season-scoped record. Reads are judged by `assertReadable`, which still lets
+   * an administrator *view* a closed season.
    */
-  async assertWritable(
-    recordSeasonId: string | null | undefined,
-    isAdmin: boolean,
-  ) {
-    if (isAdmin) return;
+  async assertWritable(recordSeasonId: string | null | undefined) {
     // No season on the row: a child table, judged through its parent.
     if (!recordSeasonId) return;
 
@@ -338,7 +344,7 @@ export class SeasonService implements OnModuleInit {
     if (season.status === 'ACTIVE') return;
 
     throw new ConflictException(
-      `That record belongs to season ${season.code}, which is closed. Only an administrator can change it.`,
+      `That record belongs to season ${season.code}, which is closed, so it cannot be changed.`,
     );
   }
 
@@ -366,8 +372,12 @@ export class SeasonService implements OnModuleInit {
    *
    * The season is created CLOSED. Activating it is a separate, deliberate
    * step, so a second season can never quietly become the open one.
+   *
+   * The creator is recorded as an id AND as a name snapshot, like every other
+   * ledger in the app: the name stays readable years later, when the user it
+   * points at may have been renamed or removed.
    */
-  async create(code: string) {
+  async create(code: string, actor: Actor) {
     if (!isValidSeasonCode(code)) {
       throw new BadRequestException('A season must look like "26-27".');
     }
@@ -393,16 +403,34 @@ export class SeasonService implements OnModuleInit {
     }
 
     return this.prismaService.season.create({
-      data: { code, startDate, endDate, status: 'CLOSED' },
+      data: {
+        code,
+        startDate,
+        endDate,
+        status: 'CLOSED',
+        createdBy: actor.id,
+        createdByName: actor.name,
+      },
     });
   }
 
   /**
    * Make a season the open one. Refuses while another season is still open, so
    * there is never any doubt about where new records go.
+   *
+   * A season that has been **closed** can never be opened again (decided
+   * 2026-10-04: closed means final). A season that has merely been created and
+   * not opened yet has no `closedAt`, so it can still be opened — which is how a
+   * new season starts.
    */
   async activate(id: string) {
     const season = await this.findOne(id);
+
+    if (season.closedAt) {
+      throw new ConflictException(
+        `Season ${season.code} was closed and cannot be reopened. Create a new season instead.`,
+      );
+    }
 
     const other = await this.prismaService.season.findFirst({
       where: { status: 'ACTIVE', id: { not: id } },
@@ -416,7 +444,7 @@ export class SeasonService implements OnModuleInit {
 
     const updated = await this.prismaService.season.update({
       where: { id },
-      data: { status: 'ACTIVE', activatedAt: new Date(), closedAt: null },
+      data: { status: 'ACTIVE', activatedAt: new Date() },
     });
 
     await this.refreshActive();

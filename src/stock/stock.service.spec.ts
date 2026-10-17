@@ -205,7 +205,7 @@ describe('an adjustment that is allowed', () => {
     const { service, db } = setup();
 
     const updated = await service.adjustStock(
-      adjust({ quantity: 50, note: 'counted at the start' }) as never,
+      adjust({ quantity: 50, note: 'counted at the start' }),
       actor,
     );
 
@@ -226,7 +226,7 @@ describe('an adjustment that is allowed', () => {
     const { service, db } = setup();
 
     await service.adjustStock(
-      adjust({ quantity: -30, reason: MovementReason.WASTE }) as never,
+      adjust({ quantity: -30, reason: MovementReason.WASTE }),
       actor,
     );
 
@@ -242,7 +242,7 @@ describe('an adjustment that is allowed', () => {
   it('stores no note rather than the word "undefined"', async () => {
     const { service, db } = setup();
 
-    await service.adjustStock(adjust({ note: undefined }) as never, actor);
+    await service.adjustStock(adjust({ note: undefined }), actor);
 
     expect(db.movements[0].note).toBeNull();
   });

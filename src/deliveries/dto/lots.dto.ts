@@ -5,7 +5,6 @@ import {
   IsOptional,
   IsString,
   Min,
-  ValidateIf,
 } from 'class-validator';
 import { ProductType } from '../enums/product-type.enum';
 import { StockType } from '../enums/stock-type.enum';
@@ -17,17 +16,16 @@ export class LotsDto {
   lotNumber!: string;
 
   /**
-   * `BIO` or `CVT` — for seeds and for anything else that genuinely has
-   * varieties.
+   * `BIO` or `CVT` — asked for on EVERY lot, peat included.
    *
-   * Not asked for on a PEAT lot: peat has no variety, it is one pool (see
-   * `stock/pooled-lot.ts`), and requiring the field only to ignore it is how
-   * `'GENERIC'` — a value that is not a `StockType` — reached the ledger
-   * (DELIV-04).
+   * Peat used to skip this field (`ValidateIf`) because all peat landed in one
+   * `'GENERIC'` pool and a variety means nothing for peat. Peat is tracked per
+   * lot now (decided 2026-10-05), so its stock type is part of the pool's
+   * identity like any other — and the form has always shown the field anyway,
+   * with `CVT` pre-selected, so requiring it asks for nothing new on screen.
    */
-  @ValidateIf((lot: LotsDto) => lot.productType !== ProductType.PEAT)
   @IsEnum(StockType)
-  stockType?: StockType;
+  stockType!: StockType;
 
   @IsNumber()
   @Min(1)

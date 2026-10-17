@@ -2,7 +2,6 @@ import { BadRequestException } from '@nestjs/common';
 import { ShipmentsService } from './shipments.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SeasonService } from '../season/season.service';
-import type { Actor } from '../common/actor';
 
 /**
  * SHIP-01 / SHIP-02 — what a shipment may take, and from which season.
@@ -152,7 +151,7 @@ function setup() {
   return { service, db };
 }
 
-const actor = { id: 'user-1', name: 'Krypton' } as Actor;
+const actor = { id: 'user-1', name: 'Krypton' };
 
 const shipment = (overrides: Record<string, unknown> = {}) => ({
   shipmentNumber: 'S-1',
@@ -166,7 +165,7 @@ describe('taking stock out (SHIP-01)', () => {
   it('draws the pool down and writes one ledger line per line', async () => {
     const { service, db } = setup();
 
-    await service.create(shipment() as never, actor);
+    await service.create(shipment(), actor);
 
     expect(db.products[0].currentQuantity).toBe(400);
     expect(db.movements).toHaveLength(1);
@@ -182,7 +181,7 @@ describe('taking stock out (SHIP-01)', () => {
           { harvestedProductId: 'prod-1', boxCount: 3 },
           { harvestedProductId: 'prod-1', boxCount: 3 },
         ],
-      }) as never,
+      }),
       actor,
     );
 
@@ -232,7 +231,7 @@ describe('which season a shipment may name (SHIP-02)', () => {
   it('accepts a shipment with no truck at all', async () => {
     const { service, db } = setup();
 
-    await service.create(shipment({ truckId: undefined }) as never, actor);
+    await service.create(shipment({ truckId: undefined }), actor);
 
     expect(db.shipments[0].truckId).toBeNull();
   });

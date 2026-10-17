@@ -10,6 +10,12 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PERMISSIONS_KEY } from '../decorators/require-permissions.decorator';
 import { ERROR_MESSAGES } from '../../common/error-messages';
 import { UserRole } from '../../users/enums/userRole.enum';
+import { AuthenticatedUser } from '../../auth/types/authenticated-user';
+import { Request } from 'express';
+
+interface RequestWithUser extends Request {
+  user?: AuthenticatedUser;
+}
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
@@ -29,7 +35,7 @@ export class PermissionsGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
+    const request = context.switchToHttp().getRequest<RequestWithUser>();
     const user = request.user;
 
     if (!user) {

@@ -6,22 +6,20 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { ReferenceType } from '../stock/enums/reference-type.enum';
-import { PEAT_POOL } from '../stock/pooled-lot';
 import { ExecuteSSMDto } from './dto/execute-ssm.dto';
 import { UpdateSSMDto } from './dto/update-ssm.dto';
 import { getPaginationParams } from '../common/pagination';
-import {
-  DEFAULT_SEEDS_PER_TRAY,
-  TRAYS_PER_PEAT_BALL,
-  sameVariety,
-} from '../common/sowing.constants';
+import { TRAYS_PER_PEAT_BALL, sameVariety } from '../common/sowing.constants';
+import { SettingsService } from '../settings/settings.service';
 import {
   assertEntrySowable,
   syncPlanEntryProgress,
 } from '../sowing-plan/plan-entry-progress';
 import { SeasonService } from '../season/season.service';
 import { ERROR_MESSAGES } from '../common/error-messages';
+import { STAGE_SEEDLING } from '../plant-stock/plant-stock.constants';
 import type { Actor } from '../common/actor';
+import { UNASSIGNED_LOCATION } from '../common/sowing.constants';
 
 @Injectable()
 export class SowingSSMService {
@@ -29,6 +27,7 @@ export class SowingSSMService {
     private prismaService: PrismaService,
     private stockService: StockService,
     private seasonService: SeasonService,
+    private settingsService: SettingsService,
   ) {}
 
   async execute(dto: ExecuteSSMDto, actor: Actor) {
@@ -40,6 +39,8 @@ export class SowingSSMService {
       code,
       lotNumber,
       stockType: dtoStockType,
+      peatLotNumber,
+      peatStockType,
       numberOfTrays,
       seedsPerTray,
       sowingDate,
@@ -128,7 +129,15 @@ export class SowingSSMService {
     }
 
     // 3. Calculate
-    const sPerTray = seedsPerTray ?? DEFAULT_SEEDS_PER_TRAY;
+    //
+    // The figures the FARM uses today come from the settings, not from the compiled
+    // constants: a new sowing follows the current setting, while the row stores what
+    // it actually used, so no later change can rewrite this record (SOW-11).
+    const sPerTray =
+      seedsPerTray ??
+      (await this.settingsService.get('DEFAULT_SEEDS_PER_TRAY'));
+    const traysPerBall = await this.settingsService.get('TRAYS_PER_PEAT_BALL');
+    const peatUsed = numberOfTrays / traysPerBall;
     const quantityUsed = numberOfTrays * sPerTray;
 
     // The sowing date must belong to the season this sowing is filed into
@@ -151,12 +160,14 @@ export class SowingSSMService {
         tx,
       );
 
-      // Deduct PEAT stock from pooled PEAT inventory (SSM always uses peat)
-      // Peat is tracked in big-ball units — see `TRAYS_PER_PEAT_BALL`.
-      const peatUsed = numberOfTrays / TRAYS_PER_PEAT_BALL;
+      // Deduct PEAT stock from the pool the operator picked (SSM always uses
+      // peat). Peat is tracked in big-ball units; the figure was worked out above,
+      // outside this transaction, and the row stores it so that the reversal can
+      // return exactly what left the pool (SOW-11).
       await this.stockService.removeStock(
         {
-          ...PEAT_POOL,
+          lotNumber: peatLotNumber,
+          stockType: peatStockType,
           productType: 'PEAT',
           quantity: peatUsed,
           referenceId: planEntryId,
@@ -178,6 +189,9 @@ export class SowingSSMService {
           lotNumber,
           stockType: stockType,
           productType: 'SEEDS',
+          peatLotNumber,
+          peatStockType,
+          peatUsed,
           numberOfTrays,
           seedsPerTray: sPerTray,
           quantityUsed,
@@ -192,14 +206,14 @@ export class SowingSSMService {
           ssmSowingId: sowing.id,
           variety,
           code: code ?? null,
-          location: tunnel?.number ?? 'Not assigned',
+          location: tunnel?.number ?? UNASSIGNED_LOCATION,
           lotNumber,
           stockType: stockType,
           numberOfTrays,
           seedsPerTray: sPerTray,
           expectedPlants: quantityUsed,
           seedsSown: quantityUsed,
-          currentStage: 'SEEDLING',
+          currentStage: STAGE_SEEDLING,
         },
       });
 
@@ -304,6 +318,8 @@ export class SowingSSMService {
     // can be cleared deliberately, by sending `null`.
     const variety = dto.variety ?? existing.variety;
     const lotNumber = dto.lotNumber ?? existing.lotNumber;
+    const peatLotNumber = dto.peatLotNumber ?? existing.peatLotNumber;
+    const peatStockType = dto.peatStockType ?? existing.peatStockType;
     const numberOfTrays = dto.numberOfTrays ?? existing.numberOfTrays;
     const sowingDate = dto.sowingDate ?? existing.sowingDate;
     const remarks = dto.remarks === undefined ? existing.remarks : dto.remarks;
@@ -325,6 +341,10 @@ export class SowingSSMService {
     }
 
     const newQuantity = numberOfTrays * sPerTray;
+    // Same reasoning as in `execute`: the current setting decides the new figure,
+    // and the row stores it — worked out here so the transaction holds no read open.
+    const traysPerBall = await this.settingsService.get('TRAYS_PER_PEAT_BALL');
+    const newPeatUsed = numberOfTrays / traysPerBall;
 
     // The tunnel row is needed for its NUMBER: the sowing keeps a denormalised
     // copy of it for the screens and for the plan's location (SSM-04).
@@ -352,11 +372,18 @@ export class SowingSSMService {
         },
         tx,
       );
-      // Reverse old peat (big-ball units)
-      const oldPeatUsed = existing.numberOfTrays / TRAYS_PER_PEAT_BALL;
+      // Reverse old peat (big-ball units) — into the pool this sowing used.
+      //
+      // What it ACTUALLY took, not what today's constant would say: those two
+      // differ the moment the trays-per-ball figure is ever changed, and the stock
+      // this returns has to match the stock that left (SOW-11). The fallback only
+      // covers rows the backfill has not reached yet.
+      const oldPeatUsed =
+        existing.peatUsed ?? existing.numberOfTrays / TRAYS_PER_PEAT_BALL;
       await this.stockService.addStock(
         {
-          ...PEAT_POOL,
+          lotNumber: existing.peatLotNumber,
+          stockType: existing.peatStockType,
           productType: 'PEAT',
           quantity: oldPeatUsed,
           referenceId: existing.planEntryId ?? existing.id,
@@ -381,11 +408,12 @@ export class SowingSSMService {
         },
         tx,
       );
-      // Deduct new peat (big-ball units)
-      const newPeatUsed = numberOfTrays / TRAYS_PER_PEAT_BALL;
+      // Deduct new peat (big-ball units) — from the pool the request names. The
+      // figure was worked out above, outside this transaction (SOW-11).
       await this.stockService.removeStock(
         {
-          ...PEAT_POOL,
+          lotNumber: peatLotNumber,
+          stockType: peatStockType,
           productType: 'PEAT',
           quantity: newPeatUsed,
           referenceId: existing.planEntryId ?? existing.id,
@@ -404,9 +432,14 @@ export class SowingSSMService {
           code,
           sowingDate,
           lotNumber,
+          peatLotNumber,
+          peatStockType,
           numberOfTrays,
           seedsPerTray: sPerTray,
           quantityUsed: newQuantity,
+          // What every future reversal returns — the figure just deducted above,
+          // not one derived again later (SOW-11).
+          peatUsed: newPeatUsed,
           remarks,
           // Only when the tunnel was actually part of the request: `undefined`
           // tells Prisma to leave the column alone, which is what "not sent"
@@ -425,7 +458,7 @@ export class SowingSSMService {
             variety,
             code,
             location: tunnelChanged
-              ? (tunnel?.number ?? 'Not assigned')
+              ? (tunnel?.number ?? UNASSIGNED_LOCATION)
               : existing.plantStock.location,
             lotNumber,
             numberOfTrays,
@@ -470,11 +503,16 @@ export class SowingSSMService {
         },
         tx,
       );
-      // Reverse peat (big-ball units)
-      const peatToReverse = existing.numberOfTrays / TRAYS_PER_PEAT_BALL;
+      // Reverse peat (big-ball units) — into the pool this sowing used.
+      //
+      // The stored figure, for the same reason as in `update`: it is what left the
+      // pool, and the constant may have moved since (SOW-11).
+      const peatToReverse =
+        existing.peatUsed ?? existing.numberOfTrays / TRAYS_PER_PEAT_BALL;
       await this.stockService.addStock(
         {
-          ...PEAT_POOL,
+          lotNumber: existing.peatLotNumber,
+          stockType: existing.peatStockType,
           productType: 'PEAT',
           quantity: peatToReverse,
           referenceId: existing.planEntryId ?? existing.id,

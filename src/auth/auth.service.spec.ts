@@ -69,22 +69,22 @@ class FakeRefreshTokens {
     return true;
   }
 
-  async findUnique(args: { where: Where; select?: Record<string, true> }) {
+  findUnique(args: { where: Where; select?: Record<string, true> }) {
     const row = this.rows.find((candidate) =>
       this.matches(candidate, args.where),
     );
-    if (!row) return null;
+    if (!row) return Promise.resolve(null);
 
-    if (!args.select) return { ...row };
+    if (!args.select) return Promise.resolve({ ...row });
 
     const picked: Record<string, unknown> = {};
     for (const key of Object.keys(args.select)) {
       picked[key] = row[key as keyof RefreshRow];
     }
-    return picked;
+    return Promise.resolve(picked);
   }
 
-  async create(args: { data: Record<string, unknown> }) {
+  create(args: { data: Record<string, unknown> }) {
     const row = {
       id: `rt-new-${++this.sequence}`,
       revokedAt: null,
@@ -92,26 +92,28 @@ class FakeRefreshTokens {
     } as unknown as RefreshRow;
 
     this.rows.push(row);
-    return { ...row };
+    return Promise.resolve({ ...row });
   }
 
-  async update(args: { where: { id: string }; data: Partial<RefreshRow> }) {
+  update(args: { where: { id: string }; data: Partial<RefreshRow> }) {
     const row = this.rows.find((candidate) => candidate.id === args.where.id);
-    if (!row) throw new Error('fake: no such refresh token');
+    if (!row) return Promise.reject(new Error('fake: no such refresh token'));
 
     Object.assign(row, args.data);
-    return { ...row };
+    return Promise.resolve({ ...row });
   }
 
-  async updateMany(args: { where: Where; data: Partial<RefreshRow> }) {
+  updateMany(args: { where: Where; data: Partial<RefreshRow> }) {
     const targets = this.rows.filter((row) => this.matches(row, args.where));
     for (const row of targets) Object.assign(row, args.data);
 
-    return { count: targets.length };
+    return Promise.resolve({ count: targets.length });
   }
 
-  async count(args: { where: Where }) {
-    return this.rows.filter((row) => this.matches(row, args.where)).length;
+  count(args: { where: Where }) {
+    return Promise.resolve(
+      this.rows.filter((row) => this.matches(row, args.where)).length,
+    );
   }
 
   /** Test helper: put a row in the table directly. */
@@ -411,7 +413,9 @@ describe('sign-out', () => {
       type: 'refresh',
     });
 
-    await service.signoutByToken(PLAIN_TOKEN, USER_ID);
+    // The owner is read FROM the token (AUTH-13), which is what lets sign-out run
+    // without a session.
+    await service.signoutByToken(PLAIN_TOKEN);
 
     expect(revokedAtOf(table, 'rt-mine')).toBeInstanceOf(Date);
     expect(revokedAtOf(table, 'rt-other-device')).toBeNull();
@@ -446,9 +450,7 @@ describe('sign-out', () => {
       throw new Error('not a token');
     };
 
-    await expect(
-      service.signoutByToken('garbage', USER_ID),
-    ).resolves.toBeUndefined();
+    await expect(service.signoutByToken('garbage')).resolves.toBeUndefined();
     expect(table.rows[0].revokedAt).toBeNull();
 
     jwtBehaviour.verify = () => ({
@@ -457,10 +459,26 @@ describe('sign-out', () => {
       type: 'refresh',
     });
 
-    await service.signoutByToken(PLAIN_TOKEN, USER_ID);
-    await expect(
-      service.signoutByToken(PLAIN_TOKEN, USER_ID),
-    ).resolves.toBeUndefined();
+    await service.signoutByToken(PLAIN_TOKEN);
+    await expect(service.signoutByToken(PLAIN_TOKEN)).resolves.toBeUndefined();
     expect(table.rows[0].revokedAt).toBeInstanceOf(Date);
+  });
+
+  it('revokes only the account named inside the token (AUTH-13)', async () => {
+    const { service, table } = setup();
+    // A row whose `jti` matches but whose owner does not: only reachable by
+    // forging a signature, and it is what proves the `sub` really is in the
+    // where-clause now that no `userId` argument is passed in.
+    table.seed({ id: 'rt-theirs', jti: 'jti-mine', userId: 'user-2' });
+
+    jwtBehaviour.verify = () => ({
+      sub: USER_ID,
+      jti: 'jti-mine',
+      type: 'refresh',
+    });
+
+    await service.signoutByToken(PLAIN_TOKEN);
+
+    expect(revokedAtOf(table, 'rt-theirs')).toBeNull();
   });
 });

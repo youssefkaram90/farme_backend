@@ -44,11 +44,11 @@ export class AgriInputsController {
     return this.agriInputsService.findAll(q, page, pageSize);
   }
 
-  @Get(':id')
-  @RequirePermissions('phytosanitary.view')
-  findOne(@Param('id') id: string) {
-    return this.agriInputsService.findOne(id);
-  }
+  // There is deliberately no `GET :id` route here (AGRI-04): no screen in web or
+  // phone ever called it. The service's `findOne` is not dead — `addProduct` and
+  // `adjustStock` use it internally to resolve the row they are about to write
+  // to, and its spec covers that. Four lines bring the route back if a
+  // product-detail screen is ever wanted.
 
   @Get(':id/movements')
   @RequirePermissions('phytosanitary.view')

@@ -15,6 +15,7 @@ import { AdminOnlyGuard } from '../permissions/guards/admin-only.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { User } from '../generated/prisma/client';
 import { AdjustStockDto } from './dto/adjust-stock.dto';
+import { SeasonIdInBody } from '../season/decorators/season-id-in-body.decorator';
 
 /**
  * Stock is a read-only module for everyone except the one ADMIN adjustment below
@@ -37,6 +38,7 @@ export class StockController {
 
   @Post('adjust')
   @UseGuards(AdminOnlyGuard)
+  @SeasonIdInBody('stockItemId')
   adjust(@Body() dto: AdjustStockDto, @CurrentUser() user: User) {
     return this.stockService.adjustStock(dto, user);
   }
@@ -61,11 +63,5 @@ export class StockController {
   @RequirePermissions('stock.view')
   findOne(@Param('id') id: string) {
     return this.stockService.findOne(id);
-  }
-
-  @Get(':id/movements')
-  @RequirePermissions('stock.view')
-  getMovements(@Param('id') id: string) {
-    return this.stockService.getMovements(id);
   }
 }

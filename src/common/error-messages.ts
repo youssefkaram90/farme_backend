@@ -75,7 +75,7 @@ const DUPLICATE_BY_MODEL_FIELDS: Record<string, string> = {
     'A sowing plan with this name already exists in this location.',
   'SowingPlan.name': 'A sowing plan with this name already exists.',
   'CropCarePlan.name': 'A crop care plan with this name already exists.',
-  'Tunnel.number': 'A tunnel with this number already exists.',
+  'Tunnel.number': 'A tunnel with this number already exists in this season.',
   'Sector.location + name':
     'A sector with this name already exists in this location.',
   'User.name': 'A user with this name already exists.',

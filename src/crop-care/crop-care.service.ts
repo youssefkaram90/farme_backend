@@ -20,6 +20,7 @@ import {
   CreatePhytosanitaryProgramDto,
   UpdatePhytosanitaryProgramDto,
   CreateCropOperationDto,
+  UpdateCropOperationDto,
   CreateCropCarePlanDto,
   ExecutePlanEntryDto,
   LocationDto,
@@ -71,24 +72,12 @@ export class CropCareService {
     return {
       ...rest,
       productId: inputSeason?.productId ?? null,
-      product: inputSeason?.product
-        ? this.withoutStaleStock(inputSeason.product)
-        : null,
+      // The product row goes out untouched. It used to be stripped of its own
+      // `currentQuantity` (CROP-07) so that a stale catalogue figure would not
+      // sit next to the season's live one — that column was dropped on
+      // 2026-10-12 (CROP-10), so there is nothing left to strip.
+      product: inputSeason?.product ?? null,
     };
-  }
-
-  /**
-   * The product, minus the stock figure.
-   *
-   * `PhytosanitaryProduct.currentQuantity` is superseded — the live number is
-   * the season's `AgriInputSeason` row — and agri-inputs deliberately never
-   * sends it. `INPUT_SEASON` selects the whole product row, so every crop-care
-   * response carried it anyway (CROP-07): a stale quantity sitting next to the
-   * fresh one, which is the confusion the split was meant to end.
-   */
-  private withoutStaleStock(product: PhytosanitaryProduct) {
-    const { currentQuantity: _superseded, ...rest } = product;
-    return rest;
   }
 
   private flattenInputSeasons<T extends WithInputSeason>(rows: T[]) {
@@ -269,6 +258,10 @@ export class CropCareService {
    * The season row is guaranteed to still be there: `AgriInputsService` refuses
    * to remove a product from a season once it has movements, and the `used` line
    * above is one.
+   *
+   * The sentence on the reversing line comes from the caller, because the same
+   * give-back now serves a deleted treatment and a corrected one (CROP-14) — and
+   * those are not the same fact to read afterwards.
    */
   private async restoreAgriInput(
     db: Db,
@@ -276,6 +269,7 @@ export class CropCareService {
     quantity: number,
     referenceId: string,
     actorName: string,
+    note: string,
   ) {
     await db.agriInputSeason.update({
       where: { id: inputSeasonId },
@@ -289,7 +283,7 @@ export class CropCareService {
         reason: MovementReason.CORRECTION,
         referenceType: AgriInputReferenceType.OPERATION,
         referenceId,
-        note: 'Treatment deleted — the stock was added back.',
+        note,
         createdByName: actorName,
       },
     });
@@ -372,9 +366,72 @@ export class CropCareService {
     });
   }
 
+  /**
+   * Delete a product from the catalogue — refused while any season still lists
+   * it (CROP-08).
+   *
+   * The catalogue is global; what hangs off a product is not. A season row
+   * cascades its stock movements away with it, and it is what the program's
+   * entries, the plans' entries and the logged operations point at. Deleting a
+   * product a season still lists therefore erases that product's past in every
+   * season — including treatments already applied, which is the one thing the
+   * compliance screen exists to prove.
+   *
+   * So a product may leave the catalogue only once no season lists it. Taking it
+   * off a season's list is a separate act, and that one is already refused once
+   * anything has actually happened to it (AGRI-02) — the two guards chain, so a
+   * used product cannot be made to vanish through this door either.
+   */
   async deleteProduct(id: string) {
-    await this.findOneProduct(id);
-    return this.prismaService.phytosanitaryProduct.delete({ where: { id } });
+    const product = await this.prismaService.phytosanitaryProduct.findUnique({
+      where: { id },
+      select: {
+        name: true,
+        seasonRows: { select: { season: { select: { code: true } } } },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+    }
+
+    const seasons = product.seasonRows.map((row) => row.season.code);
+
+    if (seasons.length > 0) {
+      const listed =
+        seasons.length === 1
+          ? `season ${seasons[0]}`
+          : `seasons ${seasons.slice(0, -1).join(', ')} and ${seasons[seasons.length - 1]}`;
+      const where =
+        seasons.length === 1 ? "that season's list" : "those seasons' lists";
+
+      throw new BadRequestException(
+        `"${product.name}" is on the product list for ${listed}, so it cannot be deleted. Take it off ${where} first.`,
+      );
+    }
+
+    // The delete carries the same condition as the check above (AGRI-02). That
+    // check is a read in its own statement, so a season row written in between
+    // used to be cascaded away with the product and nothing said so; a guarded
+    // delete cannot match in that case, and the sentence below is what is shown
+    // instead.
+    //
+    // What it does not close: a season row committed after this statement's
+    // snapshot but before it takes the row lock. Closing that needs the row
+    // locked first (`SELECT … FOR UPDATE`) or a database constraint — recorded
+    // in the plan rather than pretended here.
+    const removed = await this.prismaService.phytosanitaryProduct.deleteMany({
+      where: { id, seasonRows: { none: {} } },
+    });
+
+    if (removed.count === 0) {
+      throw new ConflictException(
+        `"${product.name}" was added to a season a moment ago, so it cannot be deleted. Refresh the page and try again.`,
+      );
+    }
+
+    // Both clients already declare this shape, so nothing else had to change.
+    return { id };
   }
 
   // ============================================================
@@ -455,7 +512,7 @@ export class CropCareService {
     return this.prismaService.$transaction(async (tx) => {
       const { productIds, ...rest } = dto;
 
-      const program = await tx.phytosanitaryProgram.update({
+      await tx.phytosanitaryProgram.update({
         where: { id },
         data: rest,
       });
@@ -671,6 +728,149 @@ export class CropCareService {
     });
   }
 
+  /**
+   * Correct a logged operation (CROP-14).
+   *
+   * Before this, a typo — the wrong dose, the wrong tunnel, the wrong day — could
+   * only be undone by deleting the operation and logging it again, which left TWO
+   * rows in the log for an event that happened once. The log is the evidence, so
+   * an edit that keeps it honest is worth more than that dance.
+   *
+   * Three things decide the shape of this method:
+   *
+   *  - The rules are the ones `createOperation` applies, read against the
+   *    operation's OWN season and never the open one — you may be correcting a
+   *    record from a season that is no longer current.
+   *  - What was used comes back BEFORE the new amount goes out, or a correction
+   *    that raises the dose would be refused over a shortage that only exists
+   *    because the old amount is still deducted. Both happen in the same
+   *    transaction, so a refusal rolls the give-back back as well.
+   *  - The ledger stays append-only (see `restoreAgriInput`): the original `used`
+   *    line is never rewritten, so a correction that changes what left the store
+   *    adds its own lines and the history still shows the first number was
+   *    written and afterwards corrected. A correction that changes neither the
+   *    product nor the amount touches the ledger at all — fixing a date or a note
+   *    is not a stock movement.
+   *
+   * The operation's `source` and its link to a plan entry are untouched: the entry
+   * says what was PLANNED, the operation says what was DONE, and correcting the
+   * second never rewrites the first.
+   */
+  async updateOperation(id: string, dto: UpdateCropOperationDto, actor: Actor) {
+    const existing = await this.prismaService.cropOperation.findUnique({
+      where: { id },
+      select: {
+        seasonId: true,
+        operationType: true,
+        inputSeasonId: true,
+        quantity: true,
+      },
+    });
+    if (!existing) {
+      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+    }
+
+    // The kind is not editable (CROP-14, decision 1) — refused here rather than
+    // only hidden in the form, because a client is not the source of truth. A
+    // treatment is not an irrigation: changing it would change what the rules
+    // below even are, and the honest fix for the wrong kind is to delete the
+    // record and log the right one.
+    if (dto.operationType !== existing.operationType) {
+      throw new BadRequestException(
+        'A logged operation keeps the kind it was recorded as. Delete it and log it again if the kind was wrong.',
+      );
+    }
+
+    // The same two rules a new operation answers (P6-07, decision 1b).
+    const usesProduct =
+      dto.operationType === 'TREATMENT' ||
+      dto.operationType === 'FERTILISATION';
+
+    if (usesProduct && !dto.productId) {
+      throw new BadRequestException(
+        dto.operationType === 'FERTILISATION'
+          ? 'Choose the fertiliser that was applied.'
+          : 'Choose the product that was used.',
+      );
+    }
+    if (!dto.locations || dto.locations.length === 0) {
+      throw new BadRequestException('At least one location is required');
+    }
+    if (dto.productId && !(dto.quantity && dto.quantity > 0)) {
+      throw new BadRequestException(
+        'Enter how much was used — that is what comes out of the stock.',
+      );
+    }
+
+    await this.assertLocationsUseable(dto.locations, existing.seasonId);
+
+    // The corrected date still has to belong to the season the record is filed
+    // into (SEASON-08).
+    await this.seasonService.assertDateInSeason(
+      new Date(dto.performedAt),
+      'operation date',
+      existing.seasonId,
+    );
+
+    return this.prismaService.$transaction(async (tx) => {
+      const inputSeasonId = await this.resolveInputSeasonId(
+        dto.productId,
+        existing.seasonId,
+        tx,
+      );
+
+      const stockChanged =
+        existing.inputSeasonId !== inputSeasonId ||
+        existing.quantity !== (dto.quantity ?? null);
+
+      if (existing.inputSeasonId && existing.quantity && stockChanged) {
+        await this.restoreAgriInput(
+          tx,
+          existing.inputSeasonId,
+          existing.quantity,
+          id,
+          actor.name,
+          'Correction — the old amount was added back.',
+        );
+      }
+
+      const updated = await tx.cropOperation.update({
+        where: { id },
+        data: {
+          inputSeasonId,
+          quantity: dto.quantity,
+          performedAt: new Date(dto.performedAt),
+          notes: dto.notes,
+          // The scope is replaced wholesale: an edit states where it was done,
+          // and working out which rows to keep would only invent cases to get
+          // wrong (the same choice as the plant-stock readings, PSTOCK-24).
+          locations: {
+            deleteMany: {},
+            create: dto.locations.map((l) => ({
+              targetType: l.targetType,
+              tunnelId: l.tunnelId,
+              sectorId: l.sectorId,
+            })),
+          },
+        },
+        include: { locations: true, inputSeason: INPUT_SEASON },
+      });
+
+      if (inputSeasonId && dto.quantity && stockChanged) {
+        await this.consumeAgriInput(
+          tx,
+          inputSeasonId,
+          dto.quantity,
+          id,
+          'Correction — this is the corrected amount.',
+          actor.name,
+        );
+      }
+
+      return this.flattenInputSeason(updated);
+    });
+  }
+
   async findAllOperations(
     q?: string,
     page?: string,
@@ -691,6 +891,26 @@ export class CropCareService {
         {
           inputSeason: {
             product: { name: { contains: q, mode: 'insensitive' as const } },
+          },
+        },
+        // A PLACE, not only a product or a note (user, 2026-10-11). "T1" is what
+        // an operator types to ask "what was done in tunnel T1?", and `q` used to
+        // match notes and product names only — so a tunnel number came back as an
+        // empty list, which reads as "nothing was ever done there". The same
+        // treatment the plant-stock list's search already gives its tunnels
+        // (PSTOCK-09).
+        {
+          locations: {
+            some: {
+              tunnel: { number: { contains: q, mode: 'insensitive' as const } },
+            },
+          },
+        },
+        {
+          locations: {
+            some: {
+              sector: { name: { contains: q, mode: 'insensitive' as const } },
+            },
           },
         },
       ];
@@ -773,6 +993,7 @@ export class CropCareService {
           operation.quantity,
           id,
           actor.name,
+          'Treatment deleted — the stock was added back.',
         );
       }
 
@@ -1020,9 +1241,52 @@ export class CropCareService {
     });
   }
 
+  /**
+   * Delete a plan — refused while any of its entries has been executed
+   * (CROP-09).
+   *
+   * Deleting a single entry that has an operation behind it is already refused
+   * (CROP-02). Deleting the plan does the same thing to every entry at once:
+   * they cascade away with it, and each operation they produced stays behind
+   * pointing at nothing while still saying it came from a plan. The rule is
+   * therefore the same one, one level up, and the sentence says it the same way.
+   */
   async deletePlan(id: string) {
-    await this.findPlanById(id);
-    return this.prismaService.cropCarePlan.delete({ where: { id } });
+    const plan = await this.findPlanById(id);
+
+    const executed = await this.prismaService.cropCarePlanEntry.count({
+      where: { planId: id, operation: { isNot: null } },
+    });
+
+    if (executed > 0) {
+      throw new ConflictException(
+        `"${plan.name}" has ${executed} ${executed === 1 ? 'treatment' : 'treatments'} logged against it, so it cannot be deleted. Mark it complete, or delete ${
+          executed === 1 ? 'that treatment' : 'those treatments'
+        } first if ${executed === 1 ? 'it was' : 'they were'} logged by mistake.`,
+      );
+    }
+
+    // The delete carries the same condition as the check above. That check is a
+    // read in its own statement, so an entry executed in between used to be
+    // cascaded away with the plan and nothing said so; a guarded delete cannot
+    // match in that case, and the sentence below is what is shown instead.
+    //
+    // What it does not close: an execution committed after this statement's
+    // snapshot but before it takes the row lock. Closing that needs the row
+    // locked first (`SELECT … FOR UPDATE`) or a database constraint — recorded
+    // in the plan rather than pretended here.
+    const removed = await this.prismaService.cropCarePlan.deleteMany({
+      where: { id, entries: { none: { operation: { isNot: null } } } },
+    });
+
+    if (removed.count === 0) {
+      throw new ConflictException(
+        `"${plan.name}" was executed a moment ago, so it cannot be deleted. Refresh the page and try again.`,
+      );
+    }
+
+    // Both clients already declare this shape, so nothing else had to change.
+    return { id };
   }
 
   async addPlanEntry(

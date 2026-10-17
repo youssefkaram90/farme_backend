@@ -3,7 +3,6 @@ import { DeliveriesService } from './deliveries.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { StockService } from '../stock/stock.service';
 import type { SeasonService } from '../season/season.service';
-import type { Actor } from '../common/actor';
 
 /**
  * DELIV-02 / DELIV-04 / DELIV-07 — what a delivery may do to the stock pool.
@@ -13,8 +12,10 @@ import type { Actor } from '../common/actor';
  * - **DELIV-02** a delivery stops being deletable the moment its stock has been
  *   used, because reversing it would put back seeds that are physically gone.
  *   The test drives the counting fake to prove the refusal names the lot.
- * - **DELIV-04** peat is one pool: the delivery row and the ledger must agree
- *   that a peat lot is `PEAT` / `GENERIC`, whatever BIO/CVT the form sent.
+ * - **DELIV-04** (revised 2026-10-05) peat is tracked per lot, like seeds: a
+ *   peat lot keeps the lot number and stock type the form sent. The old rule
+ *   forced every peat lot to `PEAT` / `GENERIC`, and the test now pins the
+ *   opposite — which is what makes a re-introduced rewrite fail.
  * - **DELIV-07** the reversal goes back into the **delivery's own season**. This
  *   is the one the stock fake is really for: if the season is dropped, the test
  *   notices, and it is the difference between correcting a closed season and
@@ -82,7 +83,7 @@ class FakeDeliveries {
       const lots = (data.lots as { create: LotRow[] }).create.map(
         (lot, index) => ({
           ...lot,
-          id: `${data.deliveryCode}-lot-${index + 1}`,
+          id: `${String(data.deliveryCode)}-lot-${index + 1}`,
           deliveryId: String(data.deliveryCode),
         }),
       );
@@ -110,9 +111,9 @@ class FakeDeliveries {
       const row = this.deliveries.find((d) => d.id === where.id)!;
 
       if (data.deliveryCode !== undefined)
-        row.deliveryCode = String(data.deliveryCode);
+        row.deliveryCode = data.deliveryCode as string;
       if (data.deliveryDate !== undefined)
-        row.deliveryDate = String(data.deliveryDate);
+        row.deliveryDate = data.deliveryDate as string;
       if (data.transport !== undefined)
         row.transport = (data.transport as string | null) ?? null;
 
@@ -169,7 +170,7 @@ class FakeDeliveries {
   };
 
   $transaction = async (callback: (tx: FakeDeliveries) => Promise<unknown>) => {
-    const deliveries = JSON.parse(JSON.stringify(this.deliveries));
+    const deliveries: DeliveryRow[] = structuredClone(this.deliveries);
 
     try {
       return await callback(this);
@@ -216,7 +217,7 @@ function setup() {
   return { service, db, judged };
 }
 
-const actor = { id: 'user-1', name: 'Krypton' } as Actor;
+const actor = { id: 'user-1', name: 'Krypton' };
 
 const delivery = (lots: Record<string, unknown>[]) => ({
   deliveryCode: 'D-1',
@@ -246,7 +247,7 @@ function givenDelivery(db: FakeDeliveries, seasonId = OPEN_SEASON) {
 }
 
 describe('creating a delivery (DELIV-04)', () => {
-  it('pools peat into PEAT/GENERIC whatever the form sent', async () => {
+  it('gives every lot its own pool — peat included', async () => {
     const { service, db } = setup();
 
     await service.create(
@@ -267,14 +268,16 @@ describe('creating a delivery (DELIV-04)', () => {
       actor,
     );
 
-    // The delivery row and the ledger agree about the same pool.
+    // Peat used to be rewritten to one `PEAT` / `GENERIC` pool here. It is a lot
+    // of its own now, so neither the lot number nor the stock type is invented:
+    // what the operator chose is what the delivery row and the ledger hold.
     expect(db.deliveries[0].lots[0]).toMatchObject({
-      lotNumber: 'PEAT',
-      stockType: 'GENERIC',
+      lotNumber: 'PT-9',
+      stockType: 'BIO',
     });
     expect(db.calls[0].params).toMatchObject({
-      lotNumber: 'PEAT',
-      stockType: 'GENERIC',
+      lotNumber: 'PT-9',
+      stockType: 'BIO',
       quantity: 40,
       referenceType: 'delivery',
     });
@@ -330,17 +333,16 @@ describe('deleting a delivery whose stock was used (DELIV-02)', () => {
 
     await service.remove('del-1', actor);
 
-    expect(db.calls).toEqual([
-      {
-        kind: 'remove',
-        params: expect.objectContaining({
-          lotNumber: 'L-9',
-          stockType: 'CVT',
-          quantity: 10,
-          seasonId: OLD_SEASON,
-        }),
+    expect(db.calls).toHaveLength(1);
+    expect(db.calls[0]).toMatchObject({
+      kind: 'remove',
+      params: {
+        lotNumber: 'L-9',
+        stockType: 'CVT',
+        quantity: 10,
+        seasonId: OLD_SEASON,
       },
-    ]);
+    });
     expect(db.deliveries).toHaveLength(0);
   });
 

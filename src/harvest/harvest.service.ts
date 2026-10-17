@@ -7,11 +7,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { Actor } from '../common/actor';
 import { getPaginationParams } from '../common/pagination';
 import { derivePlanteCode } from '../common/harvest-naming';
+import { predictedPlantsForTrays } from '../common/harvest-expectation';
 import { CreateHarvestRecordDto } from './dto/harvest.dto';
 import { WriteOffHarvestDto } from './dto/writeoff-harvest.dto';
 import { SeasonService } from '../season/season.service';
 import { HarvestReferenceType } from '../common/enums/ledger-reference-type.enum';
 import { ERROR_MESSAGES } from '../common/error-messages';
+import {
+  STAGE_HARVESTED,
+  STAGE_SEEDLING,
+} from '../plant-stock/plant-stock.constants';
 import { Prisma } from '../generated/prisma/client';
 
 /** Either client — the same alias the other services use. */
@@ -48,7 +53,10 @@ export class HarvestService {
         ssmSowing: {
           include: { tunnelAssignments: { include: { tunnel: true } } },
         },
-        lpmSowing: { select: { seasonId: true } },
+        // `sectorId` is what ties the batch to the sector it was sown into. It
+        // is selected here because the sector check below needs it — without
+        // it the sector was taken on trust.
+        lpmSowing: { select: { seasonId: true, sectorId: true } },
       },
     });
 
@@ -75,7 +83,7 @@ export class HarvestService {
     if (dto.targetType === 'TUNNEL') {
       const tunnel = await this.prismaService.tunnel.findUnique({
         where: { id: dto.tunnelId },
-        select: { number: true, seasonId: true },
+        select: { id: true, number: true, seasonId: true },
       });
 
       // The place has to belong to the open season as well (HARV-03): the
@@ -99,10 +107,23 @@ export class HarvestService {
           `Batch ${label} is not in the selected tunnel.`,
         );
       }
+
+      // A harvest bigger than what is standing there is refused (HARV-07).
+      await this.assertHarvestFits(
+        {
+          plantStockId: batch.id,
+          tunnelId: tunnel.id,
+          sectorId: null,
+          tunnelNumber: tunnel.number,
+          placeName: tunnel.number,
+        },
+        dto,
+        label,
+      );
     } else {
       const sector = await this.prismaService.sector.findUnique({
         where: { id: dto.sectorId },
-        select: { seasonId: true },
+        select: { seasonId: true, name: true },
       });
 
       if (!sector || sector.seasonId !== seasonId) {
@@ -116,6 +137,41 @@ export class HarvestService {
           `Batch ${label} was sown in tunnels, not in a sector.`,
         );
       }
+
+      // A batch may only be harvested from the sector its sowing names — the
+      // same rule the tunnel branch above applies, and the same one both
+      // clients already filter their batch list by. The sector used to be
+      // taken on trust: a harvest could be filed against a sector the batch
+      // was never in, which named the wrong place AND left the batch's own
+      // plant-stock figures (they key on the sector its SOWING names)
+      // untouched — two screens disagreeing, with nothing to say which was
+      // right.
+      //
+      // Compared by ID, never by name: `PlantStock.location` is a copy of the
+      // sector name taken at sowing, and a sector can be renamed, so a name
+      // comparison would start refusing legitimate harvests the day one was.
+      // `SowingLPM.sectorId` is the real link and never changes.
+      if (batch.lpmSowing?.sectorId !== dto.sectorId) {
+        throw new BadRequestException(
+          `Batch ${label} is not in the selected sector.`,
+        );
+      }
+
+      // The same over-harvest guard the tunnel half uses (HARV-07/08). A sector
+      // only gets one when it has been COUNTED: its `expectedPlants` is a seed
+      // figure, so judging against it would let almost anything through. Where
+      // there is a measurement, the guard stands on it; where there is not, it
+      // stays out of the way rather than pretending.
+      await this.assertHarvestFits(
+        {
+          plantStockId: batch.id,
+          tunnelId: null,
+          sectorId: dto.sectorId ?? null,
+          placeName: sector.name,
+        },
+        dto,
+        label,
+      );
     }
 
     const totalPlants = dto.boxCount * dto.plantsPerBox;
@@ -301,21 +357,34 @@ export class HarvestService {
       });
 
       if (product) {
-        const afterReversal = product.currentQuantity - record.totalPlants;
-
         // Refuse rather than clamp. Clamping to zero used to hide the problem:
         // the goods had already shipped, so the stock figure silently became
         // wrong instead of telling anyone.
-        if (afterReversal < 0) {
+        //
+        // The condition sits in the UPDATE rather than in a read taken before it,
+        // so Postgres re-checks it against the very row it locks: of two deletes
+        // arriving together, the first takes the plants and the second matches
+        // nothing, instead of both passing the same check and taking them twice.
+        // A shipment has been guarded this way since SHIP-01; this was the copy
+        // that did not get it.
+        const reversed = await tx.harvestedProduct.updateMany({
+          where: {
+            id: product.id,
+            currentQuantity: { gte: record.totalPlants },
+          },
+          data: { currentQuantity: { decrement: record.totalPlants } },
+        });
+
+        if (reversed.count === 0) {
+          const now = await tx.harvestedProduct.findUnique({
+            where: { id: product.id },
+            select: { currentQuantity: true },
+          });
+
           throw new BadRequestException(
-            `Only ${product.currentQuantity.toLocaleString('en-GB')} ${product.name} are left in stock, but removing this harvest would take out ${record.totalPlants.toLocaleString('en-GB')}. Delete or reduce the shipments that used them first.`,
+            `Only ${(now?.currentQuantity ?? 0).toLocaleString('en-GB')} ${product.name} are left in stock, but removing this harvest would take out ${record.totalPlants.toLocaleString('en-GB')}. Delete or reduce the shipments that used them first.`,
           );
         }
-
-        await tx.harvestedProduct.update({
-          where: { id: product.id },
-          data: { currentQuantity: afterReversal },
-        });
 
         // Append-only, the same rule a deleted treatment follows:
         // the `harvest` line that created these plants STAYS, and the removal is
@@ -374,35 +443,49 @@ export class HarvestService {
     dto: WriteOffHarvestDto,
     actor: Actor,
   ) {
-    const product = await this.prismaService.harvestedProduct.findUnique({
-      where: { id: productId },
-    });
-    if (!product) {
-      throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
-    }
-
-    // Only the season that is open now may be written off. A closed season is a
-    // finished year: its figures have been reported, so lowering them quietly
-    // afterwards would change numbers somebody already has on paper.
-    if (product.seasonId !== this.seasonService.getActiveSeasonId()) {
-      throw new BadRequestException(
-        'That product belongs to a season that is already closed.',
-      );
-    }
-
-    if (product.currentQuantity <= 0) {
-      throw new BadRequestException(
-        `There is nothing left of ${product.name} to write off.`,
-      );
-    }
-
-    const writtenOff = product.currentQuantity;
-
     return this.prismaService.$transaction(async (tx) => {
-      await tx.harvestedProduct.update({
-        where: { id: product.id },
+      // Read INSIDE the transaction. A figure read before it is stale by the time
+      // the write happens — and it is the write, not the read, that the movement
+      // below goes on to record.
+      const product = await tx.harvestedProduct.findUnique({
+        where: { id: productId },
+      });
+      if (!product) {
+        throw new NotFoundException(ERROR_MESSAGES.recordNotFound);
+      }
+
+      // Only the season that is open now may be written off. A closed season is a
+      // finished year: its figures have been reported, so lowering them quietly
+      // afterwards would change numbers somebody already has on paper.
+      if (product.seasonId !== this.seasonService.getActiveSeasonId()) {
+        throw new BadRequestException(
+          'That product belongs to a season that is already closed.',
+        );
+      }
+
+      if (product.currentQuantity <= 0) {
+        throw new BadRequestException(
+          `There is nothing left of ${product.name} to write off.`,
+        );
+      }
+
+      const writtenOff = product.currentQuantity;
+
+      // Empty the shelf only while it still holds the figure just read. Of two
+      // write-offs arriving together, one empties it and the other matches
+      // nothing. An unconditional write to 0 let BOTH record a full-size
+      // movement for a drop that only happened once, which leaves the ledger
+      // unable to explain the quantity it exists to explain.
+      const emptied = await tx.harvestedProduct.updateMany({
+        where: { id: product.id, currentQuantity: writtenOff },
         data: { currentQuantity: 0 },
       });
+
+      if (emptied.count === 0) {
+        throw new BadRequestException(
+          `The stock of ${product.name} changed while it was being written off. Look at it again and try once more.`,
+        );
+      }
 
       // Negative quantity = stock going out. This movement is what makes the
       // drop visible on the product page, next to the harvests that put the
@@ -423,12 +506,185 @@ export class HarvestService {
   }
 
   /**
-   * Mark a batch HARVESTED once nothing of it is left, and put it back to READY
-   * if a harvest is removed again.
+   * What is standing in ONE place, and how much of it has already been taken.
+   *
+   * ONE definition, two callers (HARV-07): the stage flip below, and the guard
+   * that refuses an over-harvest. They used to be separate sums, and the
+   * plant-stock screen had a third — which is how a screen comes to say "800
+   * left" and the server then refuses a harvest of 500. The arithmetic lives in
+   * `common/harvest-expectation.ts`; this owns which trays and which harvests
+   * belong to the scope.
+   *
+   * The expected figure, in order of what is actually known:
+   *   1. the latest plant COUNT taken in this tunnel — a measurement, not a
+   *      forecast (HARV-07: a count that came out ABOVE the prediction raises
+   *      the ceiling, so a batch that germinated better than forecast can still
+   *      be harvested in full);
+   *   2. the trays in this tunnel × the batch's seeds per tray;
+   *   3. the batch's own expectation.
+   *
+   * It never drops BELOW (2): a harvest is judged against the larger of what was
+   * measured and what was predicted, so the guard can never refuse a harvest
+   * smaller than the "remaining" the plant-stock screen is showing.
+   *
+   * The scope is per place, not per batch: a batch split over two tunnels has a
+   * budget in each, which is what the screen shows and what lets one tunnel be
+   * finished while the other still grows.
+   */
+  private async standingIn(
+    scope: {
+      plantStockId: string;
+      tunnelId: string | null;
+      sectorId: string | null;
+    },
+    db: Db = this.prismaService,
+    /** The tunnel's number, needed to find its count. Omit to skip the count. */
+    tunnelNumber?: string,
+  ) {
+    const batch = await db.plantStock.findUnique({
+      where: { id: scope.plantStockId },
+    });
+    if (!batch) return null;
+
+    let expected: number | null = batch.expectedPlants;
+
+    if (scope.tunnelId && batch.ssmSowingId) {
+      const assignment = await db.sowingTunnelAssignment.findFirst({
+        where: { ssmSowingId: batch.ssmSowingId, tunnelId: scope.tunnelId },
+      });
+      // No assignment means nothing has been transported yet, so the batch is
+      // still whole in its planned location.
+      const trays = assignment
+        ? assignment.numberOfTrays
+        : (batch.numberOfTrays ?? null);
+
+      if (trays != null) expected = predictedPlantsForTrays(batch, trays);
+
+      if (tunnelNumber) {
+        // A count is filed against the tunnel's NUMBER, not its id — the count
+        // table has no tunnel column. 'TRAY' is the SSM count type.
+        const measured = await db.plantCount.findFirst({
+          where: {
+            plantStockId: batch.id,
+            countType: 'TRAY',
+            location: tunnelNumber,
+          },
+          orderBy: { countDate: 'desc' },
+          select: { estimatedPlants: true },
+        });
+
+        if (measured) expected = Math.max(expected, measured.estimatedPlants);
+      }
+    } else if (scope.sectorId && batch.lpmSowingId) {
+      // A SECTOR has no forecast to fall back on: `expectedPlants` on an LPM
+      // batch holds the SEED count, so subtracting what has been harvested from
+      // it compares two different things. Left alone, a sector batch could
+      // never be finished — it would take harvesting as many plants as there
+      // were seeds, which is more than ever grew (HARV-08).
+      //
+      // So a sector is judged on a MEASUREMENT or not at all. The count walks
+      // one metre of a row and the app works a whole line out of it (a count's
+      // scope is one line, all seven rows), so the field is that figure times
+      // the lines sown.
+      const measured = await db.plantCount.findFirst({
+        // A sector count is filed under the batch's own location — the sector
+        // name it was sown with — which is how `saveCount` keys it, so a sector
+        // renamed since sowing still finds its own counts.
+        where: {
+          plantStockId: batch.id,
+          countType: 'ROW_METRE',
+          location: batch.location,
+        },
+        orderBy: { countDate: 'desc' },
+        select: { estimatedPlants: true },
+      });
+
+      expected = measured
+        ? measured.estimatedPlants * (batch.lines ?? 1)
+        : null;
+    }
+
+    const taken = await db.harvestRecord.aggregate({
+      where: {
+        plantStockId: scope.plantStockId,
+        tunnelId: scope.tunnelId,
+        sectorId: scope.sectorId,
+      },
+      _sum: { totalPlants: true },
+    });
+
+    const harvested = taken._sum.totalPlants ?? 0;
+
+    return {
+      batch,
+      expected,
+      harvested,
+      remaining: expected == null ? null : expected - harvested,
+    };
+  }
+
+  /**
+   * Refuse a harvest bigger than what is standing in that place (HARV-07/08).
+   *
+   * Every other stock rule in this module refuses rather than clamping — a
+   * deleted harvest that would push stock below zero is refused, and a shipment
+   * that would overdraw its pool is refused — but the harvest ENTRY accepted any
+   * figure at all. Finished goods then held plants that were never grown, and
+   * that is not merely a wrong figure on a screen: shipments draw from that
+   * pool, so an over-harvest authorised boxes that did not exist.
+   *
+   * A place with nothing measured has no guard: an uncounted sector is judged on
+   * nothing rather than on a seed count that would wave everything through.
+   *
+   * Checked before the transaction — it is a pure read, so there is nothing to
+   * roll back.
+   */
+  private async assertHarvestFits(
+    scope: {
+      plantStockId: string;
+      tunnelId: string | null;
+      sectorId: string | null;
+      /** The tunnel's number, which is how its counts are filed. */
+      tunnelNumber?: string;
+      /** What the message calls the place — a tunnel number, a sector name. */
+      placeName: string;
+    },
+    dto: CreateHarvestRecordDto,
+    label: string,
+  ) {
+    const standing = await this.standingIn(
+      {
+        plantStockId: scope.plantStockId,
+        tunnelId: scope.tunnelId,
+        sectorId: scope.sectorId,
+      },
+      this.prismaService,
+      scope.tunnelNumber,
+    );
+    if (!standing || standing.remaining == null) return;
+
+    const wanted = dto.boxCount * dto.plantsPerBox;
+    if (wanted <= standing.remaining) return;
+
+    const fmt = (n: number) => n.toLocaleString('en-GB');
+
+    throw new BadRequestException(
+      `Only ${fmt(standing.remaining)} plants of ${label} are still standing in ${scope.placeName}, but this harvest takes ${fmt(wanted)}. Check the box count — or that they were harvested in this place.`,
+    );
+  }
+
+  /**
+   * Mark a batch HARVESTED once nothing of it is left, and put it back to
+   * SEEDLING if a harvest is removed again.
+   *
+   * Those two ARE the whole vocabulary (PSTOCK-05, `PLANT_STAGES`): a batch is
+   * either growing or finished, and this is the only thing that moves it between
+   * the two. It used to say `READY` when a harvest was taken back, which was a
+   * third word nothing else knew — the plant-stock screens showed it raw.
    *
    * "Remaining" is derived from the harvest records and never stored, so it is
-   * recomputed here. For a tunnel the expected figure is that tunnel's share of
-   * the batch — a batch split over two tunnels can be finished in just one.
+   * recomputed here — by `standingIn`, the same sum the over-harvest guard
+   * refuses against, so the two can never disagree (HARV-07).
    *
    * The stage is only touched when it actually changes, so a batch that is
    * still growing is never disturbed.
@@ -441,77 +697,27 @@ export class HarvestService {
     },
     db: Db = this.prismaService,
   ) {
-    const batch = await db.plantStock.findUnique({
-      where: { id: scope.plantStockId },
-    });
-    if (!batch) return;
+    const standing = await this.standingIn(scope, db);
+    if (!standing) return;
 
-    let expected = batch.expectedPlants;
+    const { batch, remaining } = standing;
 
-    if (scope.tunnelId && batch.ssmSowingId) {
-      const assignment = await db.sowingTunnelAssignment.findFirst({
-        where: { ssmSowingId: batch.ssmSowingId, tunnelId: scope.tunnelId },
-      });
-      if (assignment) {
-        expected = this.tunnelExpectedPlants(batch, assignment.numberOfTrays);
-      }
-    }
+    // Nothing measured means nothing to judge: an uncounted sector keeps the
+    // stage it has, rather than being called finished — or still growing — on
+    // the strength of a seed count.
+    if (remaining == null) return;
 
-    const harvested = await db.harvestRecord.aggregate({
-      where: {
-        plantStockId: scope.plantStockId,
-        tunnelId: scope.tunnelId,
-        sectorId: scope.sectorId,
-      },
-      _sum: { totalPlants: true },
-    });
-
-    const remaining = expected - (harvested._sum.totalPlants ?? 0);
-
-    if (remaining <= 0 && batch.currentStage !== 'HARVESTED') {
+    if (remaining <= 0 && batch.currentStage !== STAGE_HARVESTED) {
       await db.plantStock.update({
         where: { id: batch.id },
-        data: { currentStage: 'HARVESTED' },
+        data: { currentStage: STAGE_HARVESTED },
       });
-    } else if (remaining > 0 && batch.currentStage === 'HARVESTED') {
+    } else if (remaining > 0 && batch.currentStage === STAGE_HARVESTED) {
       await db.plantStock.update({
         where: { id: batch.id },
-        data: { currentStage: 'READY' },
+        data: { currentStage: STAGE_SEEDLING },
       });
     }
-  }
-
-  /**
-   * What one tunnel's share of a batch should yield (HARV-01).
-   *
-   * The trays in that tunnel × the batch's seeds per tray. When the batch did
-   * not record a seeds-per-tray this used to multiply by 0, so `expected`
-   * collapsed to nothing and **the first harvest of any size closed the batch** —
-   * then deleting that harvest reopened it. Falling back to the batch's own
-   * expected plants, split by trays where the tray count is known, keeps the
-   * figure meaningful.
-   *
-   * Erring high is the safe direction: the batch simply stays open, which is
-   * what a harvest nobody has logged yet looks like. Erring low silently hides
-   * work still to come.
-   */
-  private tunnelExpectedPlants(
-    batch: {
-      expectedPlants: number;
-      seedsPerTray: number | null;
-      numberOfTrays: number | null;
-    },
-    traysInTunnel: number,
-  ): number {
-    if (batch.seedsPerTray && batch.seedsPerTray > 0) {
-      return traysInTunnel * batch.seedsPerTray;
-    }
-
-    if (batch.numberOfTrays && batch.numberOfTrays > 0) {
-      return batch.expectedPlants * (traysInTunnel / batch.numberOfTrays);
-    }
-
-    return batch.expectedPlants;
   }
 
   /** Finished-goods stock — what Shipment will draw from */

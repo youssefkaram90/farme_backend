@@ -9,7 +9,7 @@ import { UsersService } from '../users/users.service';
 import { ConfigService } from '@nestjs/config';
 import { User } from '../generated/prisma/client';
 import { Response, Request } from 'express';
-import { TokenPayload } from './token-payload';
+import { AccessTokenPayload, RefreshTokenPayload } from './token-payload';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ERROR_MESSAGES } from '../common/error-messages';
@@ -50,13 +50,15 @@ export class AuthService {
 
     const jti = randomUUID();
 
-    const accessPayload: TokenPayload = {
+    // No `jti` on the access token (AUTH-18): nothing identifies one access token
+    // apart from another, and the placeholder `jti: ''` this used to carry was
+    // both misleading and falsy.
+    const accessPayload: AccessTokenPayload = {
       sub: userId,
-      jti: '',
       type: 'access',
     };
 
-    const refreshPayload: TokenPayload = {
+    const refreshPayload: RefreshTokenPayload = {
       sub: userId,
       jti,
       type: 'refresh',
@@ -151,6 +153,14 @@ export class AuthService {
   }
 
   async verifyUser(name: string, password: string) {
+    // Anything that is not a string cannot be a credential. Without this,
+    // `{"password": 123456}` slipped past passport-local's truthiness check and
+    // reached argon2, whose native binding rejects a non-string with a type
+    // error — a 500 for what is really a failed sign-in (AUTH-15).
+    if (typeof name !== 'string' || typeof password !== 'string') {
+      throw new UnauthorizedException(ERROR_MESSAGES.invalidCredentials);
+    }
+
     try {
       const user = await this.userService.getUser({ name });
       const validPassword = await argon2.verify(user.password, password);
@@ -273,10 +283,10 @@ export class AuthService {
         });
 
         if (liveInFamily === 0 || !this.isDoubleRefresh(previous, metadata)) {
-          // Handled OUTSIDE the transaction, so the family revocation is not
-          // rolled back by the refusal that follows it.
           return 'reuse' as const;
         }
+
+        return 'duplicate' as const;
       }
 
       // Create new token with same familyId
@@ -307,6 +317,12 @@ export class AuthService {
         data: { revokedAt: new Date() },
       });
 
+      throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
+    }
+
+    if (outcome === 'duplicate') {
+      // Do not mint another token or revoke the family for a
+      // duplicate that matches the short grace-window checks.
       throw new UnauthorizedException(ERROR_MESSAGES.notSignedIn);
     }
 
@@ -348,6 +364,11 @@ export class AuthService {
 
     const ageMs = Date.now() - previous.revokedAt.getTime();
     if (ageMs > AuthService.DOUBLE_REFRESH_GRACE_MS) return false;
+    const hasComparableMetadata = Boolean(
+      previous.ipAddress || previous.userAgent || previous.deviceId,
+    );
+
+    if (!hasComparableMetadata) return false;
 
     return (
       AuthService.matches(previous.ipAddress, metadata?.ipAddress) &&
@@ -357,7 +378,7 @@ export class AuthService {
   }
 
   private static matches(stored: string | null, sent: string | undefined) {
-    if (!stored) return true;
+    if (!stored || !sent) return false;
 
     return stored === sent;
   }
@@ -373,22 +394,34 @@ export class AuthService {
    * not an error (AUTH-07 — `update` raised P2025, which the filter turned into
    * a 404 that aborted the controller *before* the cookies were cleared, leaving
    * the device signed in), and one account can never revoke another's token.
+   *
+   * `userId` comes from the VERIFIED payload, not from an access token, so this
+   * works with no session at all (AUTH-13) — which is exactly the state a user is
+   * in when they press "sign out" after the access token has expired. The `jti`
+   * and the `sub` arrive in the same signed string, so a caller can still only
+   * revoke their own token: forging either half requires the refresh secret.
    */
-  async signoutByToken(rawRefreshToken: string, userId: string) {
-    let jti: string;
+  async signoutByToken(rawRefreshToken: string) {
+    let payload: RefreshTokenPayload;
 
     try {
-      jti = this.jwtService.verify<TokenPayload>(rawRefreshToken, {
+      payload = this.jwtService.verify<RefreshTokenPayload>(rawRefreshToken, {
         secret: this.configService.getOrThrow('JWT_REFRESH_TOKEN_SECRET'),
-      }).jti;
+      });
     } catch {
       // Malformed, expired, or signed with another secret: there is nothing of
       // this user's to revoke, and that is not worth an error.
       return;
     }
 
+    // The secret above already proves we issued this token, but the KIND is
+    // checked too (AUTH-18): that separation lives in configuration, this one in
+    // code. A token with no `jti` is not something `signTokens` can produce as a
+    // refresh token, and `where: { jti: '' }` would match nothing anyway.
+    if (payload.type !== 'refresh' || !payload.jti) return;
+
     await this.prismaService.refreshToken.updateMany({
-      where: { jti, userId, revokedAt: null },
+      where: { jti: payload.jti, userId: payload.sub, revokedAt: null },
       data: { revokedAt: new Date() },
     });
   }

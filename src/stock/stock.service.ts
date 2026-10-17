@@ -350,6 +350,18 @@ export class StockService {
     });
   }
 
+  /**
+   * One lot, with its whole ledger and its season.
+   *
+   * The movements come WITH the lot — there is no second endpoint for them
+   * (STOCK-09): the phone used to fetch the lot and then fetch the same rows
+   * again, rendering the copy it had just wasted.
+   *
+   * Deliberately unpaginated (decided 2026-10-01, STOCK-04): a lot belongs to a
+   * single season and this is the history panel of one lot's page, so it is
+   * bounded in practice. Revisit if a lot's ledger ever grows past a few hundred
+   * rows — the fix then is a `page`/`pageSize` on THIS call, not a new route.
+   */
   async findOne(id: string) {
     const item = await this.prismaService.stockItem.findUnique({
       where: { id },
@@ -358,7 +370,7 @@ export class StockService {
           orderBy: { createdAt: 'desc' },
         },
         // The lot's own season, not the open one: a lot is never carried across
-        // seasons, so this is the season every movement below belongs to.
+        // seasons, so this is the season every movement above belongs to.
         season: { select: { code: true } },
       },
     });
@@ -371,35 +383,37 @@ export class StockService {
   }
 
   /**
-   * Every movement of one lot — the lot's whole story, newest first.
+   * How much stock is on hand per product type, and in how many lots.
    *
-   * Deliberately unpaginated (decided 2026-10-01, STOCK-04): a lot belongs to a
-   * single season and this is the history panel of one lot's page, so it is
-   * bounded in practice. Revisit if a pooled lot (all PEAT lives in one) ever
-   * grows past a few hundred rows.
+   * The adding up happens IN THE DATABASE (STOCK-12). It used to fetch every
+   * stock row of the season — every column of it — and total them with a loop in
+   * Node to produce four numbers. That was harmless while peat was a single row;
+   * it is not now that peat is tracked per lot, and this endpoint is called by
+   * the stock page, the dashboard AND the phone's stock hub, so three screens
+   * were paying for it.
+   *
+   * Same answer, same shape — the clients read `summary.SEEDS` / `summary.PEAT`.
+   * The two seeded entries are what keep a season with no rows at all answering
+   * zeros instead of an empty object.
    */
-  async getMovements(stockItemId: string) {
-    return this.prismaService.stockMovement.findMany({
-      where: { stockItemId },
-      orderBy: { createdAt: 'desc' },
-    });
-  }
-
   async getSummary() {
-    const items = await this.prismaService.stockItem.findMany({
+    const groups = await this.prismaService.stockItem.groupBy({
+      by: ['productType'],
       where: { seasonId: this.seasonService.getActiveSeasonId() },
+      _sum: { currentQuantity: true },
+      _count: { _all: true },
     });
-    const summary = {
+
+    const summary: Record<string, { totalQuantity: number; lots: number }> = {
       SEEDS: { totalQuantity: 0, lots: 0 },
       PEAT: { totalQuantity: 0, lots: 0 },
-    } as Record<string, { totalQuantity: number; lots: number }>;
+    };
 
-    for (const item of items) {
-      if (!summary[item.productType]) {
-        summary[item.productType] = { totalQuantity: 0, lots: 0 };
-      }
-      summary[item.productType].totalQuantity += item.currentQuantity;
-      summary[item.productType].lots += 1;
+    for (const group of groups) {
+      summary[group.productType] = {
+        totalQuantity: group._sum.currentQuantity ?? 0,
+        lots: group._count._all,
+      };
     }
 
     return summary;

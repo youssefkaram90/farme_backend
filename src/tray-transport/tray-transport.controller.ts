@@ -17,9 +17,6 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { RequirePermissions } from '../permissions/decorators/require-permissions.decorator';
-import { CurrentUser } from '../auth/current-user.decorator';
-import { UserRole } from '../users/enums/userRole.enum';
-import type { User } from '../generated/prisma/client';
 
 /**
  * Moving trays out of the nursery and into tunnels — the last step of a sowing.
@@ -46,14 +43,13 @@ export class TrayTransportController {
   constructor(private readonly service: TrayTransportService) {}
 
   /**
-   * The role is passed down because the season rule here cannot be applied by an
-   * interceptor: the ids travel in the body, so this route is judged in the
-   * service (TRAY-03).
+   * The season rule is applied in the service, not by an interceptor: the ids
+   * travel in the body, so the route cannot name the record it touches (TRAY-03).
    */
   @Post()
   @RequirePermissions('sowing.create')
-  assign(@Body() dto: CreateTunnelAssignmentsDto, @CurrentUser() user: User) {
-    return this.service.assign(dto, user.role === UserRole.ADMIN);
+  assign(@Body() dto: CreateTunnelAssignmentsDto) {
+    return this.service.assign(dto);
   }
 
   @Get('pending')

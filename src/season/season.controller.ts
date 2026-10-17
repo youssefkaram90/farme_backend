@@ -14,10 +14,12 @@ import { UserRole } from '../users/enums/userRole.enum';
 import { SeasonService } from './season.service';
 import { SeasonCloseService } from './season-close.service';
 import { CreateSeasonDto } from './dto/create-season.dto';
+import { CloseSeasonDto } from './dto/close-season.dto';
 import type { User } from '../generated/prisma/client';
 
 // NOTE: 'active' is declared FIRST on purpose. Nest matches routes in
-// declaration order, and ':id' below would otherwise swallow it.
+// declaration order, so a ':id'-shaped route declared above it would otherwise
+// swallow it.
 @Controller('seasons')
 export class SeasonController {
   constructor(
@@ -52,7 +54,9 @@ export class SeasonController {
   @Get('alignment')
   @UseGuards(JwtAuthGuard)
   alignment(@CurrentUser() user: User) {
-    return this.seasonService.getAlignment(user?.role === UserRole.ADMIN);
+    return this.seasonService.getAlignment(
+      user?.role === UserRole.ADMIN.toString(),
+    );
   }
 
   /**
@@ -67,13 +71,17 @@ export class SeasonController {
   }
 
   /**
-   * Close this season and open the next one. ADMIN-only — closing is never a
-   * grantable permission — and irreversible.
+   * Close this season, then open whichever season the administrator chose — or
+   * none (`open: null`). ADMIN-only: closing is never a grantable permission.
    */
   @Post(':id/close')
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
-  close(@Param('id') id: string) {
-    return this.seasonCloseService.close(id);
+  close(
+    @Param('id') id: string,
+    @Body() dto: CloseSeasonDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.seasonCloseService.close(id, dto.open ?? null, user);
   }
 
   // Everything below is ADMIN-only: a closed season is restricted to
@@ -84,16 +92,10 @@ export class SeasonController {
     return this.seasonService.findAll();
   }
 
-  @Get(':id')
-  @UseGuards(JwtAuthGuard, AdminOnlyGuard)
-  findOne(@Param('id') id: string) {
-    return this.seasonService.findOne(id);
-  }
-
   @Post()
   @UseGuards(JwtAuthGuard, AdminOnlyGuard)
-  create(@Body() dto: CreateSeasonDto) {
-    return this.seasonService.create(dto.code);
+  create(@Body() dto: CreateSeasonDto, @CurrentUser() user: User) {
+    return this.seasonService.create(dto.code, user);
   }
 
   @Patch(':id/activate')

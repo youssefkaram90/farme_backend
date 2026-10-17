@@ -1,6 +1,15 @@
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  Min,
+  ValidateNested,
+} from 'class-validator';
 import { NormalizeName } from '../../common/normalize-name';
-import { ROWS_PER_LINE } from '../../common/sowing.constants';
 
 export enum PlantCountType {
   /** SSM — whole trays sampled inside one tunnel. */
@@ -9,59 +18,63 @@ export enum PlantCountType {
   ROW_METRE = 'ROW_METRE',
 }
 
-export class CreatePlantCountDto {
-  @IsEnum(PlantCountType)
-  countType!: PlantCountType;
-
+/** One reading: what the operator found in ONE sample. */
+export class PlantCountSampleDto {
   /**
-   * SSM: number of trays inspected.
-   * LPM: number of 1-metre samples taken — a sample is always one metre of one
-   * row, so this doubles as the row-metres covered. Not a fixed figure: as many
-   * as the operator judges necessary.
+   * LPM only — the line this reading came from (1..lines). Refused for trays,
+   * which belong to no line.
    */
-  @IsInt()
-  @Min(1)
-  sampleSize!: number;
-
-  /**
-   * Plants present in the sample. Supply exactly one of this and
-   * `missingPlants` — when gaps are counted the plants are derived from the
-   * seeds expected in the sample.
-   */
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  countedPlants?: number;
-
-  /** Gaps found in the sample. Mutually exclusive with `countedPlants`. */
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  missingPlants?: number;
-
-  /**
-   * SSM only — the tunnel that was counted. A sowing batch can be spread over
-   * several tunnels, and each must be counted on its own.
-   */
-  @IsOptional()
-  @IsString()
-  location?: string;
-
-  /** LPM only — which line of the sowing was sampled (1..lines). */
   @IsOptional()
   @IsInt()
   @Min(1)
   line?: number;
 
   /**
-   * LPM only — how many of the rows were covered. The operator takes at least
-   * one sample per row, so this can never exceed `sampleSize`.
+   * Plants present in THIS sample. Supply exactly one of this and
+   * `missingPlants` — when gaps are counted the plants follow from the seeds this
+   * one sample was sown with.
    */
   @IsOptional()
   @IsInt()
-  @Min(1)
-  @Max(ROWS_PER_LINE)
-  rowsInspected?: number;
+  @Min(0)
+  countedPlants?: number;
+
+  /** Gaps found in THIS sample. Mutually exclusive with `countedPlants`. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  missingPlants?: number;
+}
+
+export class CreatePlantCountDto {
+  @IsEnum(PlantCountType)
+  countType!: PlantCountType;
+
+  /**
+   * SSM only — the tunnel that was counted. A sowing batch can be spread over
+   * several tunnels, and each must be counted on its own: together with the
+   * batch's id this is the KEY a count is found by, so a batch in two tunnels has
+   * one count per tunnel.
+   */
+  @IsOptional()
+  @IsString()
+  location?: string;
+
+  /**
+   * The readings, in the order they were taken — ONE per sample: a tray (SSM) or
+   * one metre of one row (LPM).
+   *
+   * The list is the COMPLETE set, not an addition (PSTOCK-24 → PUT, decided
+   * 2026-10-11): the count IS its readings, so adding one, correcting a typo and
+   * deleting one are all the same act — save the list.
+   *
+   * A blank row is not a reading: the screens send only the filled ones.
+   */
+  @IsArray()
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => PlantCountSampleDto)
+  samples!: PlantCountSampleDto[];
 
   @NormalizeName()
   @IsOptional()
