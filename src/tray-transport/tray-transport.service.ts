@@ -315,6 +315,8 @@ export class TrayTransportService {
         select: {
           id: true,
           variety: true,
+          code:true,
+          sowingDate:true,
           numberOfTrays: true,
           lotNumber: true,
           plan: { select: { name: true } },

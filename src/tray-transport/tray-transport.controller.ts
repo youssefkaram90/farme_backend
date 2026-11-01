@@ -47,43 +47,43 @@ export class TrayTransportController {
    * travel in the body, so the route cannot name the record it touches (TRAY-03).
    */
   @Post()
-  @RequirePermissions('sowing.create')
+  @RequirePermissions('tray-transport.create')
   assign(@Body() dto: CreateTunnelAssignmentsDto) {
     return this.service.assign(dto);
   }
 
   @Get('pending')
-  @RequirePermissions('sowing.view')
+  @RequirePermissions('tray-transport.view')
   findPendingTransport() {
     return this.service.findPendingTransport();
   }
 
   @Get()
-  @RequirePermissions('sowing.view')
+  @RequirePermissions('tray-transport.view')
   findAll(@Query('page') page?: string, @Query('pageSize') pageSize?: string) {
     return this.service.findAll(page, pageSize);
   }
 
   @Get('sowing/:ssmSowingId')
-  @RequirePermissions('sowing.view')
+  @RequirePermissions('tray-transport.view')
   findBySowing(@Param('ssmSowingId') ssmSowingId: string) {
     return this.service.findBySowing(ssmSowingId);
   }
 
   @Get('tunnel/:tunnelId')
-  @RequirePermissions('sowing.view')
+  @RequirePermissions('tray-transport.view')
   findByTunnel(@Param('tunnelId') tunnelId: string) {
     return this.service.findByTunnel(tunnelId);
   }
 
   @Patch(':id')
-  @RequirePermissions('sowing.edit')
+  @RequirePermissions('tray-transport.edit')
   update(@Param('id') id: string, @Body() dto: UpdateTunnelAssignmentDto) {
     return this.service.update(id, dto);
   }
 
   @Delete(':id')
-  @RequirePermissions('sowing.delete')
+  @RequirePermissions('tray-transport.delete')
   remove(@Param('id') id: string) {
     return this.service.remove(id);
   }

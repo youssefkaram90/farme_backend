@@ -127,6 +127,13 @@ const PERMISSIONS = [
     name: 'permissions.view',
     description: 'View permissions and their assignments',
   },
+  {
+    name: 'tray-transport.view',
+    description: 'View tray transport and assignments',
+  },
+  { name: 'tray-transport.create', description: 'Assign trays to tunnels' },
+  { name: 'tray-transport.edit', description: 'Edit tray assignments' },
+  { name: 'tray-transport.delete', description: 'Remove tray assignments' },
 ];
 
 async function main() {
